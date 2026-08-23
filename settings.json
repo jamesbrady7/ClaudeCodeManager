@@ -1,0 +1,19 @@
+{
+  "model": "glm-4.7",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "autoUpdates": false,
+  "cleanupPeriodDays": 99999,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"D:\\ClaudeCode\\roles\\track-session.ps1\""
+          }
+        ]
+      }
+    ]
+  }
+}
