@@ -4,19 +4,33 @@ import os
 
 from ccui.infra.config import CONFIG_DIR, PROVIDER_FILE, log
 
+_provider_cache = {'key': None, 'map': {}}  # (mtime,size) → 映射，文件未变走缓存
+
 
 def read_provider_mapping():
+    """会话→provider 映射。文件未变时走缓存（热路径：每棵树重建都读）。"""
     try:
-        with open(PROVIDER_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        st = os.stat(PROVIDER_FILE)
+        key = (st.st_mtime, st.st_size)
     except Exception:
         return {}
+    if _provider_cache.get('key') == key:
+        return _provider_cache['map']
+    try:
+        with open(PROVIDER_FILE, 'r', encoding='utf-8') as f:
+            mapping = json.load(f)
+    except Exception:
+        mapping = {}
+    _provider_cache['key'] = key
+    _provider_cache['map'] = mapping
+    return mapping
 
 
 def write_provider_mapping(mapping):
     try:
         with open(PROVIDER_FILE, 'w', encoding='utf-8') as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
+        _provider_cache.clear()  # 写后失效缓存，下次读按新 mtime 重建
     except Exception as e:
         log(f'写 session-providers.json 失败: {e}')
 

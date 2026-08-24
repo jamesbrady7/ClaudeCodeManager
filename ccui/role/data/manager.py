@@ -41,6 +41,7 @@ class RoleManager:
                 sessionCount=len(tracked),
                 knowledgeSize=len(k.encode('utf-8')),
                 knowledgeExists=bool(k),
+                icon=role_store.role_icon_path(name),
             )
         # 兼容 cc-role.ps1 新建的旧角色：缺失 uuid 时生成并写回 meta.json
         for name, role in roles.items():

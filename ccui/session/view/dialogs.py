@@ -1,17 +1,22 @@
 """会话模块对话框（view 层）。"""
 import os
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QPushButton, QRadioButton,
+    QVBoxLayout, QHBoxLayout, QFormLayout,
+    QLabel, QLineEdit, QPushButton,
     QDialogButtonBox, QComboBox, QFileDialog, QTreeWidget, QTreeWidgetItem,
+    QAbstractItemView, QHeaderView, QDialog,
 )
 
-from ccui.app.theme import fmt_size
+from ccui.app.theme import fmt_size, fmt_time
+from ccui.app.dialogs import FadeDialog, mk_buttons
+from ccui.app.icons import provider_icon, ui_icon
+from ccui.app.splash import warning_pixmap
 
 
-class ResumeDialog(QDialog):
+class ResumeDialog(FadeDialog):
     """恢复会话：选择权限模式 + Provider（默认 = 该会话上次的）。"""
 
     def __init__(self, default_mode, title_hint, providers, default_provider, parent=None):
@@ -23,37 +28,33 @@ class ResumeDialog(QDialog):
                       f'{"危险模式" if default_mode == "danger" else "正常模式"}')
         hint.setWordWrap(True)
         lay.addWidget(hint)
-        self.rb_normal = QRadioButton('正常模式')
-        self.rb_danger = QRadioButton('危险模式（跳过权限确认）')
-        if default_mode == 'danger':
-            self.rb_danger.setChecked(True)
-        else:
-            self.rb_normal.setChecked(True)
-        lay.addWidget(self.rb_normal)
-        lay.addWidget(self.rb_danger)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('权限模式：'))
+        self.cb_mode = QComboBox()
+        self.cb_mode.addItem(ui_icon('shield-check', 14, '#c8c8cc'), '正常模式', 'normal')
+        self.cb_mode.addItem(ui_icon('shield-off', 14, '#ff6961'), '危险模式（跳过权限确认）', 'danger')
+        self.cb_mode.setCurrentIndex(1 if default_mode == 'danger' else 0)
+        mode_row.addWidget(self.cb_mode, 1)
+        lay.addLayout(mode_row)
         prov_row = QHBoxLayout()
         prov_row.addWidget(QLabel('Provider:'))
         self.cb_provider = QComboBox()
-        self.cb_provider.addItems(providers if providers else ['(无)'])
+        for p in (providers if providers else ['(无)']):
+            self.cb_provider.addItem(provider_icon(p), p)
         if default_provider and default_provider in providers:
             self.cb_provider.setCurrentIndex(providers.index(default_provider))
         prov_row.addWidget(self.cb_provider, 1)
         lay.addLayout(prov_row)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText('恢复')
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        lay.addWidget(mk_buttons(self, '恢复'))
 
     def mode(self):
-        return 'danger' if self.rb_danger.isChecked() else 'normal'
+        return self.cb_mode.currentData()
 
     def provider(self):
         return self.cb_provider.currentText()
 
 
-class NewSessionDialog(QDialog):
+class NewSessionDialog(FadeDialog):
     """新建会话：工作目录（原生选择器）+ Provider + 可选继承会话。"""
 
     def __init__(self, providers, default_provider, last_cwd, parent=None, sessions=None):
@@ -72,10 +73,15 @@ class NewSessionDialog(QDialog):
         dir_row.addWidget(self.btn_browse)
         form.addRow('工作目录', dir_row)
         self.cb_provider = QComboBox()
-        self.cb_provider.addItems(providers if providers else ['(无)'])
+        for p in (providers if providers else ['(无)']):
+            self.cb_provider.addItem(provider_icon(p), p)
         if default_provider and default_provider in providers:
             self.cb_provider.setCurrentIndex(providers.index(default_provider))
         form.addRow('Provider', self.cb_provider)
+        self.cb_mode = QComboBox()
+        self.cb_mode.addItem(ui_icon('shield-check', 14, '#c8c8cc'), '正常模式', 'normal')
+        self.cb_mode.addItem(ui_icon('shield-off', 14, '#ff6961'), '危险模式（跳过权限确认）', 'danger')
+        form.addRow('权限模式', self.cb_mode)
         inherit_row = QHBoxLayout()
         self.lbl_inherit = QLabel('未选择')
         inherit_row.addWidget(self.lbl_inherit, 1)
@@ -84,12 +90,15 @@ class NewSessionDialog(QDialog):
         inherit_row.addWidget(self.btn_inherit)
         form.addRow('继承会话', inherit_row)
         lay.addLayout(form)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText('创建并启动')
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
+        btns = mk_buttons(self, '创建并启动')
+        self.btn_ok = btns.button(QDialogButtonBox.StandardButton.Ok)
+        # 目录为空时禁用创建（inline 校验：按钮态即反馈）
+        self.dir_edit.textChanged.connect(self._sync_ok)
+        self._sync_ok()
         lay.addWidget(btns)
+
+    def _sync_ok(self):
+        self.btn_ok.setEnabled(bool(self.dir_edit.text().strip()))
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, '选择工作目录',
@@ -110,44 +119,101 @@ class NewSessionDialog(QDialog):
     def provider(self):
         return self.cb_provider.currentText()
 
+    def mode(self):
+        return self.cb_mode.currentData()
+
     def inherit_ids(self):
         return list(self._inherit_ids)
 
 
-class InheritDialog(QDialog):
+class InheritDialog(FadeDialog):
     """选择要继承的会话（可多选；勾选 0 个 = 不继承）。
 
     角色「创建角色会话」与会话模块「新建会话」复用；通过 title/ok_text/hint 调整文案。
     """
 
     def __init__(self, sessions, parent=None, title='选择要继承的会话',
-                 ok_text='开始继承会话', hint=''):
+                 ok_text='开始继承会话', hint='', cwd_visible=False, cwd=''):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(520, 380)
+        self._changed_at = 0  # 勾选框默认切换守卫：避免 itemClicked 双重切换
         lay = QVBoxLayout(self)
         if hint:
             h = QLabel(hint)
             h.setWordWrap(True)
             lay.addWidget(h)
+        if cwd_visible:
+            # 创建角色会话时可选工作目录 + 权限模式
+            cwd_row = QHBoxLayout()
+            cwd_row.addWidget(QLabel('工作目录：'))
+            self.cwd_edit = QLineEdit(cwd or os.path.expanduser('~'))
+            self.btn_cwd_browse = QPushButton('浏览…')
+            self.btn_cwd_browse.clicked.connect(self._browse_cwd)
+            cwd_row.addWidget(self.cwd_edit, 1)
+            cwd_row.addWidget(self.btn_cwd_browse)
+            lay.addLayout(cwd_row)
+            mode_row = QHBoxLayout()
+            mode_row.addWidget(QLabel('权限模式：'))
+            self.cb_mode = QComboBox()
+            self.cb_mode.addItem(ui_icon('shield-check', 14, '#c8c8cc'), '正常模式', 'normal')
+            self.cb_mode.addItem(ui_icon('shield-off', 14, '#ff6961'), '危险模式（跳过权限确认）', 'danger')
+            mode_row.addWidget(self.cb_mode, 1)
+            lay.addLayout(mode_row)
         self.list = QTreeWidget()
         self.list.setHeaderLabels(['会话', '时间'])
         self.list.setRootIsDecorated(False)
+        # 列分布：标题列 stretch 吃满剩余，时间列收缩到内容
+        _h = self.list.header()
+        _h.setStretchLastSection(False)
+        _h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        _h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        # 纯勾选：点击不整行蓝选，只切换勾选框（与会话列表风格统一）
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list.itemClicked.connect(self._toggle_item)  # 点行任意位置即切换勾选
+        self.list.itemChanged.connect(lambda *_: setattr(self, '_changed_at', time.time()))
         for s in sessions:
             if s.isLive:
                 continue
-            item = QTreeWidgetItem([s.title or '(空会话)', ''])
+            item = QTreeWidgetItem([s.title or '(空会话)', fmt_time(s.lastTime)])
             item.setData(0, Qt.ItemDataRole.UserRole, s.id)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             self.list.addTopLevelItem(item)
         lay.addWidget(self.list)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText(ok_text)
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
+        btns = mk_buttons(self, ok_text)
+        self.btn_ok = btns.button(QDialogButtonBox.StandardButton.Ok)
+        if cwd_visible:
+            # 目录为空时禁用创建（inline 校验）
+            self.cwd_edit.textChanged.connect(self._sync_ok)
+            self._sync_ok()
         lay.addWidget(btns)
+
+    def _sync_ok(self):
+        if hasattr(self, 'btn_ok') and hasattr(self, 'cwd_edit'):
+            self.btn_ok.setEnabled(bool(self.cwd_edit.text().strip()))
+
+    def _toggle_item(self, item, column):
+        # 勾选框点击时 Qt 已默认切换，itemChanged 刚更新 _changed_at → 跳过，避免双重切换
+        if time.time() - self._changed_at < 0.1:
+            return
+        item.setCheckState(0, Qt.CheckState.Unchecked if item.checkState(0) == Qt.CheckState.Checked
+                           else Qt.CheckState.Checked)
+
+    def _browse_cwd(self):
+        d = QFileDialog.getExistingDirectory(self, '选择工作目录', self.cwd_edit.text())
+        if d:
+            self.cwd_edit.setText(d)
+
+    def directory(self):
+        """所选工作目录（未显示 cwd 选择时返回空串）。"""
+        edit = getattr(self, 'cwd_edit', None)
+        return edit.text().strip() if edit else ''
+
+    def mode(self):
+        """所选权限模式（未显示模式选择时默认 normal）。"""
+        cb = getattr(self, 'cb_mode', None)
+        return cb.currentData() if cb else 'normal'
 
     def selected_ids(self):
         return [self.list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
@@ -155,29 +221,37 @@ class InheritDialog(QDialog):
                 if self.list.topLevelItem(i).checkState(0) == Qt.CheckState.Checked]
 
 
-class DeleteDialog(QDialog):
-    """删除确认：列出会话 + 释放大小。"""
+class DeleteDialog(FadeDialog):
+    """删除确认：列出会话 + 释放大小（清理空会话复用，可自定义文案）。"""
 
-    def __init__(self, items, total_size, parent=None):
+    def __init__(self, items, total_size, parent=None, title='确认删除',
+                 confirm_text='确认删除', intro=None):
         super().__init__(parent)
-        self.setWindowTitle('确认删除')
+        self.setWindowTitle(title)
         self.resize(480, 320)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f'确认删除 {len(items)} 个会话？将释放约 {fmt_size(total_size)}：'))
+        if intro is None:
+            intro = f'确认删除 {len(items)} 个会话？将释放约 {fmt_size(total_size)}：'
+        lay.addWidget(QLabel(intro))
         lst = QTreeWidget(self)
         lst.setHeaderLabels(['会话', '项目'])
         lst.setRootIsDecorated(False)
-        for title, proj in items:
-            lst.addTopLevelItem(QTreeWidgetItem([title, proj]))
+        _h = lst.header()
+        _h.setStretchLastSection(False)
+        _h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        _h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        for t, proj in items:
+            lst.addTopLevelItem(QTreeWidgetItem([t, proj]))
         lay.addWidget(lst)
-        warn = QLabel('⚠ 运行中的会话不会被删除（已自动排除）')
-        warn.setStyleSheet('color:#f14c4c;')
-        lay.addWidget(warn)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText('确认删除')
-        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
-            'background:rgba(255,69,58,.2);color:#ff6961;border:1px solid rgba(255,69,58,.4);border-radius:8px;padding:6px 16px;')
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        warn_row = QHBoxLayout()
+        warn_icon = QLabel()
+        warn_icon.setPixmap(warning_pixmap(14).scaled(
+            14, 14, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+        warn_row.addWidget(warn_icon)
+        warn_text = QLabel('运行中的会话不会被删除（已自动排除）')
+        warn_text.setStyleSheet('color:#f14c4c;')
+        warn_row.addWidget(warn_text)
+        warn_row.addStretch(1)
+        lay.addLayout(warn_row)
+        lay.addWidget(mk_buttons(self, confirm_text, danger_ok=True))

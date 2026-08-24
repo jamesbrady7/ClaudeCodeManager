@@ -7,17 +7,19 @@ import os
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QFileSystemWatcher, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QPushButton, QLabel, QDialog, QMenu,
-    QAbstractItemView, QHeaderView, QMessageBox,
+    QAbstractItemView, QHeaderView, QMessageBox, QApplication,
 )
 
 from ccui.infra.config import ROLES_DIR, SKILLS_DIR, PROJECTS, SESSIONS_DIR, log
 from ccui.infra.signalhub import SignalHub
 from ccui.infra.utils import iso_to_ms
-from ccui.app.theme import fmt_time, trunc
+from ccui.app.theme import fmt_relative, trunc, apply_shadow
+from ccui.app.widgets import ElidedLabel, FadeMenu, EmptyHint, AccentBarDelegate, PressButton
+from ccui.app.icons import role_icon, role_avatar, role_icon_full, provider_icon, ui_icon
 from ccui.session.data.manager import SessionManager
 from ccui.session.data.models import Session, SpawnedSession
 from ccui.role.data.manager import RoleManager
@@ -25,7 +27,7 @@ from ccui.role.service.role_service import RoleService
 from ccui.session.service.session_service import SessionService
 from ccui.session.view.dialogs import ResumeDialog, DeleteDialog, InheritDialog
 from ccui.role.view.dialogs import (
-    NewRoleDialog, SkillsDialog, KnowledgeDialog,
+    NewRoleDialog, SkillsDialog, KnowledgeDialog, EditRoleDialog,
 )
 
 
@@ -63,41 +65,80 @@ class RolePanel(QWidget):
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(8, 8, 4, 8)
-        self.btn_new_role = QPushButton('+ 新建角色')
+        self.btn_new_role = PressButton('新建角色')
+        self.btn_new_role.setObjectName('btnNew')  # 与「新建会话」一致的主蓝按钮
+        self.btn_new_role.setIcon(ui_icon('plus', 14, '#ffffff'))
         self.btn_new_role.clicked.connect(self._new_role)
         left_lay.addWidget(self.btn_new_role)
         self.role_list = QListWidget()
+        self.role_list.setObjectName('roleList')
         self.role_list.setMinimumWidth(180)
+        self.role_list.setIconSize(QSize(26, 26))
         self.role_list.currentItemChanged.connect(self._on_role_selected)
+        self.role_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.role_list.customContextMenuRequested.connect(self._show_role_menu)
+        self.role_list.setItemDelegate(AccentBarDelegate(self.role_list))  # 选中左蓝条
+        apply_shadow(self.role_list, blur=20, dy=4, alpha=50)  # 侧栏浮起阴影
         left_lay.addWidget(self.role_list)
 
         # 右：角色详情 + 会话
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(4, 8, 8, 8)
+        name_row = QHBoxLayout()
+        self.lbl_role_icon = QLabel()
+        self.lbl_role_icon.setFixedSize(48, 48)
+        name_row.addWidget(self.lbl_role_icon)
+        name_row.addSpacing(8)
+        name_col = QVBoxLayout()
         self.lbl_name = QLabel('选择左侧角色')
-        _f = self.lbl_name.font(); _f.setPointSize(_f.pointSize() + 4); _f.setBold(True)
-        self.lbl_name.setFont(_f)
-        right_lay.addWidget(self.lbl_name)
+        # 标签级 stylesheet：覆盖全局 QSS 的 font-size（setFont 会被 13px 盖掉）
+        # 字体族按字形回退：英文 → Dancing Script（手写体），中文 → 华文行楷（STXingkai）
+        self.lbl_name.setStyleSheet(
+            'font-size: 24px; font-weight: 400;'
+            'font-family: "Dancing Script", "STXingkai", "Segoe UI";'
+            'letter-spacing: 0px; color: #f5f5f7;')
+        name_col.addWidget(self.lbl_name)
         self.lbl_desc = QLabel('')
         self.lbl_desc.setWordWrap(True)
-        right_lay.addWidget(self.lbl_desc)
+        self.lbl_desc.setStyleSheet('color:#98989d; margin-top:2px;')
+        name_col.addWidget(self.lbl_desc)
+        name_row.addLayout(name_col, 1)
+        right_lay.addLayout(name_row)
+        right_lay.addSpacing(6)
 
         skill_row = QHBoxLayout()
-        self.lbl_skills = QLabel('')
+        self.lbl_skills = ElidedLabel('')   # 超宽自动省略号，不撑布局/挤压左列表
         skill_row.addWidget(self.lbl_skills, 1)
         self.btn_skills = QPushButton('管理技能')
+        self.btn_skills.setIcon(ui_icon('wrench', 14, '#c8c8cc'))
         self.btn_skills.clicked.connect(self._manage_skills)
         skill_row.addWidget(self.btn_skills)
         right_lay.addLayout(skill_row)
 
         action_row = QHBoxLayout()
-        self.btn_start = QPushButton('创建角色会话')
+        self.btn_start = PressButton('创建角色会话')
+        self.btn_start.setObjectName('btnNew')  # 与「新建会话」一致的主蓝按钮
+        self.btn_start.setIcon(ui_icon('plus', 14, '#ffffff'))
         self.btn_start.clicked.connect(self._start)
-        self.btn_knowledge = QPushButton('编辑知识库')
+        # 两个「编辑」用纯图标（书/齿轮普世可辨识），tooltip 兜底
+        self.btn_knowledge = QPushButton()
+        self.btn_knowledge.setObjectName('iconBtn')
+        self.btn_knowledge.setIcon(ui_icon('book-open', 15, '#c8c8cc'))
+        self.btn_knowledge.setIconSize(QSize(15, 15))
+        self.btn_knowledge.setToolTip('编辑知识库')
+        self.btn_knowledge.setFixedSize(32, 30)
         self.btn_knowledge.clicked.connect(self._edit_knowledge)
+        self.btn_icon = QPushButton()
+        self.btn_icon.setObjectName('iconBtn')
+        self.btn_icon.setIcon(ui_icon('settings', 15, '#c8c8cc'))
+        self.btn_icon.setIconSize(QSize(15, 15))
+        self.btn_icon.setToolTip('编辑角色信息')
+        self.btn_icon.setFixedSize(32, 30)
+        self.btn_icon.clicked.connect(self._edit_role)
         action_row.addWidget(self.btn_start)
         action_row.addWidget(self.btn_knowledge)
+        action_row.addWidget(self.btn_icon)
         action_row.addStretch(1)
         right_lay.addLayout(action_row)
 
@@ -111,15 +152,24 @@ class RolePanel(QWidget):
         # 操作改右键菜单（启动/恢复、删除）
         self.session_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.session_tree.customContextMenuRequested.connect(self._show_session_menu)
+        self.session_tree.itemDoubleClicked.connect(self._on_sess_double_clicked)  # 双击恢复
         header = self.session_tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        # 列头图标：标题/时间/轮数/模型（通过 model 的 DecorationRole）
+        _model = self.session_tree.model()
+        for icon, col in (('message-square', 0), ('clock', 1), ('repeat', 2), ('cpu', 3)):
+            _model.setHeaderData(col, Qt.Orientation.Horizontal,
+                                 ui_icon(icon, 12, '#9a9aa0'), Qt.ItemDataRole.DecorationRole)
         self.session_tree.setColumnWidth(1, 90)
         self.session_tree.setColumnWidth(2, 70)
         right_lay.addWidget(self.session_tree)
+        apply_shadow(self.session_tree, blur=18, dy=3, alpha=45)  # 面板浮起阴影
+        # 空状态提示
+        self.empty_hint = EmptyHint('该角色还没有会话', self.session_tree)
 
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -194,6 +244,8 @@ class RolePanel(QWidget):
         self.role_list.clear()
         for r in self.roles:
             item = QListWidgetItem(f"{r.name}（{r.sessionCount}）")
+            item.setIcon(role_avatar(r.name, r.icon))          # 微信式头像
+            item.setSizeHint(QSize(0, 46))                     # 大留白行高
             item.setData(Qt.ItemDataRole.UserRole, r.name)
             item.setToolTip(r.description)
             self.role_list.addItem(item)
@@ -217,6 +269,7 @@ class RolePanel(QWidget):
     def _clear_detail(self):
         self.current_role = None
         self.lbl_name.setText('选择左侧角色')
+        self.lbl_role_icon.clear()
         self.lbl_desc.setText('')
         self.lbl_skills.setText('')
         self.session_tree.clear()
@@ -224,6 +277,7 @@ class RolePanel(QWidget):
     def _show_role(self, role):
         self.current_role = role
         self.lbl_name.setText(role.name)
+        self.lbl_role_icon.setPixmap(role_icon_full(role.name, role.icon, 48).pixmap(48, 48))
         self.lbl_desc.setText(role.description or '')
         self.lbl_skills.setText('技能：' + ('、'.join(role.skills) if role.skills else '（无）'))
         self._load_role_sessions(role.name, force=True)
@@ -297,17 +351,29 @@ class RolePanel(QWidget):
             item.setText(0, trunc(title, 70))
             item.setToolTip(0, tooltip + (' · 正在运行' if s.isLive else ''))
             if not s.isSpawned:
-                item.setText(1, fmt_time(s.lastTime))
+                item.setText(1, fmt_relative(s.lastTime))
                 item.setText(2, f"{s.userCount}Q/{s.assistantCount}A")
                 item.setText(3, trunc(' '.join(s.models), 40))
+                if s.models:
+                    prov = self.session_service.resolve_provider(u, s.models)
+                    if prov:
+                        item.setIcon(3, provider_icon(prov))
             item.setData(0, Qt.ItemDataRole.UserRole, u)
             item.setData(0, Qt.ItemDataRole.UserRole + 1, s)  # 右键菜单取 isLive
             if s.isLive:
                 item.setDisabled(True)
             self.session_tree.addTopLevelItem(item)
+        self.empty_hint.set_empty(self.session_tree.topLevelItemCount() == 0)
+
+    def _on_sess_double_clicked(self, item, column):
+        """双击角色会话 = 恢复（运行中跳过）。"""
+        sid = item.data(0, Qt.ItemDataRole.UserRole)
+        sess = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if sid and sess and not sess.isLive:
+            self._resume_session(sid, sess)
 
     def _show_session_menu(self, pos):
-        """右键菜单：启动（恢复）/ 删除；运行中的会话两项都禁用。"""
+        """右键菜单：启动（恢复）/ 打开所在目录 / 复制 ID / 删除；运行中的会话删除禁用。"""
         item = self.session_tree.itemAt(pos)
         if not item:
             return
@@ -315,15 +381,28 @@ class RolePanel(QWidget):
         sess = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if not sid or not sess:
             return
-        menu = QMenu(self)
-        act_start = menu.addAction('启动（恢复）')
-        act_del = menu.addAction('删除')
+        menu = FadeMenu(self)
+        act_start = menu.addAction(ui_icon('play', 15, '#d4d4d8'), '启动（恢复）')
+        act_open = menu.addAction(ui_icon('folder-open', 15, '#d4d4d8'), '打开所在目录')
+        act_copy = menu.addAction(ui_icon('copy', 15, '#d4d4d8'), '复制会话 ID')
+        menu.addSeparator()
+        act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
         if sess.isLive:
             act_start.setEnabled(False)
             act_del.setEnabled(False)
+        if not (sess.projectPath and os.path.isdir(sess.projectPath)):
+            act_open.setEnabled(False)
         chosen = menu.exec(self.session_tree.viewport().mapToGlobal(pos))
         if chosen == act_start:
             self._resume_session(sid, sess)
+        elif chosen == act_open:
+            if sess.projectPath and os.path.isdir(sess.projectPath):
+                os.startfile(sess.projectPath)
+            else:
+                self.status_message.emit('项目目录不存在', 3000)
+        elif chosen == act_copy:
+            QApplication.clipboard().setText(sid)
+            self.status_message.emit('会话 ID 已复制', 2000)
         elif chosen == act_del:
             self._delete_session(sid, sess)
 
@@ -400,17 +479,19 @@ class RolePanel(QWidget):
             return
         sessions, _ = self.session_service.scan()
         dlg = InheritDialog(sessions, self, title='创建角色会话',
-                            ok_text='创建', hint='不勾选任何会话则直接创建新会话')
+                            ok_text='创建', hint='不勾选任何会话则直接创建新会话',
+                            cwd_visible=True, cwd=os.path.dirname(ROLES_DIR))
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         ids = dlg.selected_ids()
         name = self.current_role.name
-        proc = self.service.start_role(name, ids)
+        cwd = dlg.directory() or os.path.dirname(ROLES_DIR)
+        proc = self.service.start_role(name, ids, cwd=cwd, mode=dlg.mode())
         if proc:
             started_at = int(time.time() * 1000)
             # 登记共享占位 → 广播 sessions.changed，会话面板立即显示（两侧同步）
             try:
-                spawned = SpawnedSession(cwd=os.path.dirname(ROLES_DIR), startedAt=started_at,
+                spawned = SpawnedSession(cwd=cwd, startedAt=started_at,
                                          pid=proc.pid if hasattr(proc, 'pid') else proc,
                                          proc=proc, provider='')
                 self.session_manager.register_spawn(spawned)
@@ -434,6 +515,77 @@ class RolePanel(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.service.write_knowledge(self.current_role.name, dlg.content())
             self.status_message.emit('知识库已保存', 3000)
+
+    def _show_role_menu(self, pos):
+        """角色列表右键菜单：创建会话 / 编辑信息 / 删除。"""
+        item = self.role_list.itemAt(pos)
+        if not item:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+        self.role_list.setCurrentRow(self.role_list.row(item))  # 动作作用于被右键的角色
+        menu = FadeMenu(self)
+        act_start = menu.addAction(ui_icon('plus', 15, '#d4d4d8'), '创建角色会话')
+        act_edit = menu.addAction(ui_icon('settings', 15, '#d4d4d8'), '编辑角色信息')
+        menu.addSeparator()
+        act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
+        chosen = menu.exec(self.role_list.viewport().mapToGlobal(pos))
+        if chosen == act_start:
+            self._start()
+        elif chosen == act_edit:
+            self._edit_role()
+        elif chosen == act_del:
+            self._delete_role(name)
+
+    def _delete_role(self, name):
+        if not name:
+            return
+        was_current = bool(self.current_role and self.current_role.name == name)
+        if QMessageBox.question(
+                self, '删除角色',
+                f'确定删除角色「{name}」？\n角色目录将整体删除（含知识库、技能、会话记录）。',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.service.delete_role(name)
+        self.status_message.emit(f'角色 {name} 已删除', 3000)
+        self._load_roles()
+        if self.role_list.count() > 0:
+            if was_current:
+                self.role_list.setCurrentRow(0)
+        else:
+            self._clear_detail()
+
+    def _edit_role(self):
+        """编辑角色信息：名称 / 描述 / 图标。"""
+        if not self.current_role:
+            return
+        role = self.current_role
+        dlg = EditRoleDialog(role, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dlg.name()
+        desc = dlg.description()
+        icon_path = dlg.icon()
+        if not new_name:
+            self.status_message.emit('角色名称不能为空', 3000)
+            return
+        # 图标没变则不传（避免重命名后指向旧路径拷贝失败）
+        icon_changed = icon_path and icon_path != (role.icon or '')
+        r = self.service.update_role(role.name, new_name, desc,
+                                     icon_path if icon_changed else None)
+        if r['ok']:
+            self.status_message.emit('角色信息已更新', 3000)
+            self._load_roles()
+            target = r.get('name') or new_name
+            for i in range(self.role_list.count()):
+                if self.role_list.item(i).data(Qt.ItemDataRole.UserRole) == target:
+                    self.role_list.setCurrentRow(i)
+                    break
+            fresh = next((x for x in self.roles if x.name == target), None)
+            if fresh:
+                self._show_role(fresh)
+        else:
+            self.status_message.emit('更新失败：' + (r.get('error') or ''), 3000)
 
     def _manage_skills(self):
         if not self.current_role:

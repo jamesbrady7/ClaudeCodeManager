@@ -23,7 +23,7 @@ $rolesDir    = Join-Path $configDir 'roles'
 $projectsDir = Join-Path $configDir 'projects'
 $skillsDir   = Join-Path $configDir 'skills'
 
-$nameRe    = '^[a-zA-Z0-9_-]+$'
+$nameRe    = '^[\w一-鿿-]+$'   # 拉丁/数字/下划线/连字符 + 中日韩（中文角色名可用）
 $reserved  = @('new','list','ls','help','rm','roles','role')
 $INHERIT_MAX_BLOCKS = 60
 $INHERIT_MAX_CHAR   = 800
@@ -271,7 +271,7 @@ function List-Roles {
 }
 
 function Start-Role {
-    param([string]$Name, [string]$FromIds, [switch]$ExtractOnly)
+    param([string]$Name, [string]$FromIds, [switch]$ExtractOnly, [string]$Mode = 'normal')
     if (-not (Test-RoleName $Name)) {
         Write-Host "非法角色名 '$Name'" -ForegroundColor Red
         exit 1
@@ -299,8 +299,11 @@ function Start-Role {
     # 这里只设 CC_ROLE 并启动普通 claude（交互模式下 --agent 需要真实
     # agent 文件，内联 --agents 不被认可，故改走 hook 通道）。
     $env:CC_ROLE = $Name
-    Write-Host ("启动角色会话: $Name（CC_ROLE=" + $Name + "）") -ForegroundColor Green
-    & $claudeCmd
+    $claudeArgs = @()
+    # 危险模式必须用 --dangerously-skip-permissions（claude danger 会被当成提示词，自动输入 danger）
+    if ($Mode -eq 'danger') { $claudeArgs += '--dangerously-skip-permissions' }
+    Write-Host ("启动角色会话: $Name（CC_ROLE=" + $Name + "，$Mode 模式）") -ForegroundColor Green
+    & $claudeCmd @claudeArgs
     $code = $LASTEXITCODE
     Remove-Item Env:CC_ROLE -ErrorAction SilentlyContinue
     exit $code
@@ -327,14 +330,20 @@ switch ($cmd) {
             $name = $sub
             $fromIds = ''
             $extractOnly = $false
+            $mode = 'normal'
             for ($i = 2; $i -lt $args.Count; $i++) {
-                if (($args[$i] -eq '--from' -or $args[$i] -eq '--extract') -and ($i + 1) -lt $args.Count) {
-                    $fromIds = $args[$i + 1]
-                    if ($args[$i] -eq '--extract') { $extractOnly = $true }
+                $a = $args[$i]
+                if (($a -eq '--from' -or $a -eq '--extract' -or $a -eq '--mode') -and ($i + 1) -lt $args.Count) {
+                    if ($a -eq '--mode') {
+                        $mode = $args[$i + 1]
+                    } else {
+                        $fromIds = $args[$i + 1]
+                        if ($a -eq '--extract') { $extractOnly = $true }
+                    }
                     $i++
                 }
             }
-            Start-Role -Name $name -FromIds $fromIds -ExtractOnly:$extractOnly
+            Start-Role -Name $name -FromIds $fromIds -ExtractOnly:$extractOnly -Mode $mode
         }
     }
     default { Show-Usage }

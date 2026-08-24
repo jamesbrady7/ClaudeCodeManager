@@ -39,3 +39,22 @@ def iso_to_ms(ts):
 
 def ms_to_iso(ms):
     return datetime.datetime.utcfromtimestamp(ms / 1000).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+
+def trunc(s, n):
+    """超长省略：s 长度超过 n 时截断并加省略号。"""
+    return s if len(s) <= n else s[:n] + '…'
+
+
+def text_content(message):
+    """从 message（dict 或 str）取第一条 text 文本。transcript 各层通用。"""
+    if not isinstance(message, dict):
+        return ''
+    c = message.get('content')
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        for blk in c:
+            if isinstance(blk, dict) and blk.get('type') == 'text' and blk.get('text'):
+                return str(blk['text'])
+    return ''

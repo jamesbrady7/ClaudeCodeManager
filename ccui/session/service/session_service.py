@@ -10,6 +10,7 @@ import datetime
 from ccui.infra.config import CONFIG_DIR
 from ccui.infra.process import spawn_terminal
 from ccui.infra.signalhub import SignalHub
+from ccui.infra.utils import trunc, text_content, iso_to_ms
 from ccui.session.data import store
 from ccui.session.data import provider as provider_data
 from ccui.session.data.manager import SessionManager
@@ -35,6 +36,20 @@ class SessionService:
     def resolve_provider(self, sid, models):
         return provider_data.resolve_provider(sid, models)
 
+    def provider_map(self, sessions):
+        """{sid: provider}：读一次映射文件，其余按模型推断 / 全局默认。"""
+        mapping = provider_data.read_provider_mapping()
+        provs = provider_data.list_providers()
+        out = {}
+        for s in sessions:
+            prov = mapping.get(s.id)
+            if not prov:
+                prov = provider_data.infer_provider(s.models, provs['providers'])
+            if not prov:
+                prov = provs['default']
+            out[s.id] = prov
+        return out
+
     def list_providers(self):
         return provider_data.list_providers()
 
@@ -42,13 +57,18 @@ class SessionService:
         return store.detect_permission_mode(sid)
 
     # ---- 动作 ----
-    def new_session(self, cwd, provider, inherit_path=None):
-        """以指定 provider 在 cwd 启动新会话，登记占位。返回 SpawnedSession 或 None。
+    def new_session(self, cwd, provider, mode='normal', inherit_path=None):
+        """以指定 provider+权限模式在 cwd 启动新会话，登记占位。返回 SpawnedSession 或 None。
 
+        mode: 'normal' | 'danger'（danger 时 `cc danger ...` 跳过权限确认）。
         inherit_path 给定时通过 CC_INHERIT 环境变量传给 SessionStart hook，
         让新会话先读继承摘要文件。
         """
-        args = ['cc', '--provider', provider] if provider and provider != '(无)' else ['cc']
+        args = ['cc']
+        if mode == 'danger':
+            args.append('danger')
+        if provider and provider != '(无)':
+            args += ['--provider', provider]
         env = {'CC_INHERIT': inherit_path} if inherit_path else None
         proc = spawn_terminal(args, cwd, env=env)
         if proc is None:
@@ -80,21 +100,6 @@ class SessionService:
         """
         ids = [x for x in (ids or []) if x]
 
-        def text_of(msg):
-            if not isinstance(msg, dict):
-                return ''
-            c = msg.get('content')
-            if isinstance(c, str):
-                return c
-            if isinstance(c, list):
-                for blk in c:
-                    if isinstance(blk, dict) and blk.get('type') == 'text' and blk.get('text'):
-                        return str(blk['text'])
-            return ''
-
-        def trunc(s, n):
-            return s if len(s) <= n else s[:n] + '…'
-
         now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
         out = [f'# 继承自 {len(ids)} 个会话', '', f'生成时间: {now}', '']
         budget = 0
@@ -122,16 +127,18 @@ class SessionService:
                 if not isinstance(o, dict):
                     continue
                 if not first_ts and o.get('timestamp'):
-                    first_ts = o['timestamp']
+                    ts_ms = iso_to_ms(o['timestamp'])
+                    if ts_ms and ts_ms <= int(time.time() * 1000) + 3600 * 1000:
+                        first_ts = o['timestamp']
                 if o.get('type') == 'user':
                     if not title:
-                        title = trunc(text_of(o.get('message')), 80)
+                        title = trunc(text_content(o.get('message')), 80)
                         cwd = o.get('cwd', '')
-                    t = text_of(o.get('message'))
+                    t = text_content(o.get('message'))
                     if t:
                         blocks.append('用户: ' + trunc(t, 800))
                 elif o.get('type') == 'assistant':
-                    t = text_of(o.get('message'))
+                    t = text_content(o.get('message'))
                     if t:
                         blocks.append('助手: ' + trunc(t, 800))
                 while len(blocks) > 60:
@@ -167,6 +174,3 @@ class SessionService:
             SignalHub.instance().emit('sessions.changed')
         return ok
 
-    def select_empty(self, sessions):
-        """返回空会话（0 回复）且非运行中的 id 集合。"""
-        return {s.id for s in sessions if s.isEmpty and not s.isLive}

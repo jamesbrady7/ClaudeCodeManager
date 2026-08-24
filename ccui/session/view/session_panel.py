@@ -2,17 +2,31 @@
 
 通过 status_message 信号把状态消息发给宿主窗口（MainWindow 的 statusBar）。
 """
+import math
 import os
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QFileSystemWatcher, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QLineEdit, QDialog, QFileDialog, QMessageBox,
-    QAbstractItemView, QHeaderView,
+    QAbstractItemView, QHeaderView, QFrame, QGraphicsOpacityEffect, QStyledItemDelegate,
+    QApplication,
 )
+
+LIVE_ROLE = Qt.ItemDataRole.UserRole + 5  # 标记 LIVE 行（delegate 画底衬）
+
+
+class LiveRowDelegate(QStyledItemDelegate):
+    """LIVE 行浅红底衬：画在 base paint 之上（QSS 背景覆盖不了 setBackground，故用此）。"""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        # 查第 0 列的 LIVE 标记（每列单元格都整行铺红底衬）
+        if index.siblingAtColumn(0).data(LIVE_ROLE):
+            painter.fillRect(option.rect, QColor(255, 69, 58, 24))
 
 from ccui.infra.config import PROJECTS, SESSIONS_DIR, HISTORY, CLAUDE_JSON, READONLY, log
 from ccui.infra.signalhub import SignalHub
@@ -21,7 +35,9 @@ from ccui.session.data import store
 from ccui.session.data.manager import SessionManager
 from ccui.session.data.models import Session
 from ccui.session.service.session_service import SessionService
-from ccui.app.theme import fmt_size, fmt_time, trunc, COLOR_GROUP, COLOR_MUTED, COLOR_EMPTY, COLOR_LIVE
+from ccui.app.theme import (fmt_size, fmt_relative, trunc, COLOR_GROUP, COLOR_MUTED, COLOR_EMPTY, COLOR_LIVE)
+from ccui.app.icons import provider_icon, role_icon_full, ui_icon
+from ccui.app.widgets import EmptyHint, FadeMenu, PressButton
 from ccui.session.view.dialogs import ResumeDialog, NewSessionDialog, DeleteDialog
 from ccui.role.data import store as role_store
 from ccui.role.data.manager import RoleManager
@@ -52,6 +68,7 @@ class SessionPanel(QWidget):
         self._last_key = None
         self._suppress = False
         self._changed_at = 0  # 避免复选框点击双重切换
+        self._entrance_done = False  # 首次入场淡入只做一次
         self._totals = {'count': 0, 'sizeBytes': 0, 'liveCount': 0}
         self._last_cwd = os.path.expanduser('~')
         self._user_widths = {}       # 用户手动拖过的列宽（自动布局时跳过）
@@ -68,22 +85,32 @@ class SessionPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
 
-        toolbar = QHBoxLayout()
-        self.btn_new = QPushButton('新建会话')
+        # 工具栏条带：底部细分割，层次分明
+        toolbar_bar = QFrame()
+        toolbar_bar.setObjectName('toolbarBar')
+        toolbar = QHBoxLayout(toolbar_bar)
+        toolbar.setContentsMargins(0, 0, 0, 10)
+        self.btn_new = PressButton('新建会话')
+        self.btn_new.setIcon(ui_icon('plus', 15, '#ffffff'))
         self.btn_new.setObjectName('btnNew')  # Apple 蓝主按钮
         self.btn_new.clicked.connect(self.on_new_session)
         toolbar.addWidget(self.btn_new)
-        self.btn_delete = QPushButton('删除选中')
+        # 删除选中：纯图标（垃圾桶普世可辨识），危险红，tooltip 兜底
+        self.btn_delete = QPushButton()
+        self.btn_delete.setObjectName('iconBtn')
+        self.btn_delete.setIcon(ui_icon('trash-2', 15, '#ff6961'))
+        self.btn_delete.setIconSize(QSize(15, 15))
+        self.btn_delete.setToolTip('删除选中')
         self.btn_delete.setProperty('danger', True)
+        self.btn_delete.setFixedSize(34, 30)
         self.btn_delete.clicked.connect(self.on_delete)
         self.btn_delete.setEnabled(not READONLY)
         toolbar.addWidget(self.btn_delete)
-        self.btn_empty = QPushButton('选中空会话')
-        self.btn_empty.clicked.connect(self.on_select_empty)
+        self.btn_empty = QPushButton('清理空会话')
+        self.btn_empty.setIcon(ui_icon('broom', 15, '#c8c8cc'))
+        self.btn_empty.setToolTip('一键删除所有空会话（有确认）')
+        self.btn_empty.clicked.connect(self.on_clean_empty)
         toolbar.addWidget(self.btn_empty)
-        self.btn_refresh = QPushButton('刷新')
-        self.btn_refresh.clicked.connect(self._rescan)
-        toolbar.addWidget(self.btn_refresh)
         toolbar.addStretch(1)
         self.lbl_totals = QLabel('')
         self.lbl_totals.setObjectName('totals')
@@ -91,28 +118,42 @@ class SessionPanel(QWidget):
         self.edit_search = QLineEdit()
         self.edit_search.setPlaceholderText('搜索标题 / 路径 / 模型…')
         self.edit_search.setMaximumWidth(240)
+        self.edit_search.setClearButtonEnabled(True)
+        self.edit_search.addAction(ui_icon('search', 14, '#6b6b70'),
+                                   QLineEdit.ActionPosition.LeadingPosition)
         self.edit_search.textChanged.connect(self._rescan)
         toolbar.addWidget(self.edit_search)
-        root.addLayout(toolbar)
+        root.addWidget(toolbar_bar)
 
         self.tree = SessionTree()
-        self.tree.setColumnCount(8)
-        self.tree.setHeaderLabels(['会话', '角色', '时间', '轮数', '模型', '大小', '状态', '操作'])
+        self.tree.setHeaderLabels(['会话', '角色', '时间', '轮数', '模型', '大小', '状态'])
         self.tree.setRootIsDecorated(True)
-        self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         header = self.tree.header()
         header.setStretchLastSection(False)  # 空白留给标题列，不给最后一列
         header.setMinimumSectionSize(MIN_SECTION)  # 被拖的列不能小于最小宽
+        # 列头图标：会话/角色/时间/轮数/模型/大小/状态（通过 model 的 DecorationRole）
+        _model = self.tree.model()
+        for icon, col in (('message-square', 0), ('users', 1), ('clock', 2),
+                          ('repeat', 3), ('cpu', 4), ('database', 5), ('activity', 6)):
+            _model.setHeaderData(col, Qt.Orientation.Horizontal,
+                                 ui_icon(icon, 12, '#9a9aa0'), Qt.ItemDataRole.DecorationRole)
         # 全部 Interactive：用户可拖列宽；自动布局由 _apply_layout 管理
-        for i in range(8):
+        for i in range(7):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)  # 双击恢复
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_session_menu)
+        self.tree.setItemDelegate(LiveRowDelegate(self.tree))  # LIVE 行浅红底衬
         self.tree.viewResized.connect(self._apply_layout)
         header.sectionResized.connect(self._on_section_resized)
         root.addWidget(self.tree)
+        # 空状态提示（随树缩放居中）
+        self.empty_hint = EmptyHint('暂无会话\n点击「新建会话」开始', self.tree)
+        self.tree.viewResized.connect(lambda: self.empty_hint.refresh())
 
     def _setup_watcher(self):
         self.watcher = QFileSystemWatcher(self)
@@ -131,6 +172,12 @@ class SessionPanel(QWidget):
         self.tick.setInterval(2000)
         self.tick.timeout.connect(self._tick)
         self.tick.start()
+        # LIVE 徽标微呼吸（运行中会话存在时才生效）
+        self._breath = 0
+        self.breath_timer = QTimer(self)
+        self.breath_timer.setInterval(500)
+        self.breath_timer.timeout.connect(self._breath_tick)
+        self.breath_timer.start()
         # 事件驱动刷新：数据层变更（创建/删除/恢复/占位）→ 响应式重扫
         SignalHub.instance().subscribe('sessions.changed', self._schedule_rescan)
 
@@ -140,6 +187,42 @@ class SessionPanel(QWidget):
     def _tick(self):
         if self.service.spawned or self._totals['liveCount'] > 0:
             self._rescan()
+
+    def _breath_tick(self):
+        """「● LIVE」呼吸：正弦明暗（亮红 #ff453a ↔ 暗红 #6e1a15，~4s 周期），清晰可见。"""
+        if self._totals['liveCount'] <= 0:
+            return
+        self._breath += 1
+        t = (math.sin(self._breath * 0.6) + 1) / 2.0   # 0..1 平滑往返
+        r = int(255 - (255 - 110) * t)
+        g = int(69 - (69 - 26) * t)
+        b = int(58 - (58 - 21) * t)
+        color = QColor(r, g, b)
+        for i in range(self.tree.topLevelItemCount()):
+            head = self.tree.topLevelItem(i)
+            for j in range(head.childCount()):
+                row = head.child(j)
+                sid = row.data(0, Qt.ItemDataRole.UserRole)
+                s = self._by_id.get(sid) if sid else None
+                if s and s.isLive:
+                    row.setForeground(6, QBrush(color))
+        self._render_totals(color)
+
+    def _entrance_fade(self):
+        """首次入场淡入（一次，结束后移除 effect 避免常驻栅格化）。"""
+        if self._entrance_done:
+            return
+        self._entrance_done = True
+        eff = QGraphicsOpacityEffect(self.tree)
+        self.tree.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b'opacity')
+        anim.setDuration(320)
+        anim.setStartValue(0.25)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self.tree.setGraphicsEffect(None))
+        self._entrance_anim = anim
+        anim.start()
 
     # ---- 扫描与渲染 ----
     def _rescan(self):
@@ -230,11 +313,11 @@ class SessionPanel(QWidget):
         self._applying_layout = True
         try:
             if 0 not in self._user_widths:
-                used = sum(header.sectionSize(i) for i in range(1, 8))
+                used = sum(header.sectionSize(i) for i in range(1, 7))
                 header.resizeSection(0, max(80, vp - used))
             else:
-                used = sum(header.sectionSize(i) for i in range(0, 7))
-                header.resizeSection(7, max(40, vp - used))
+                used = sum(header.sectionSize(i) for i in range(0, 6))
+                header.resizeSection(6, max(40, vp - used))
         finally:
             self._applying_layout = False
 
@@ -247,15 +330,28 @@ class SessionPanel(QWidget):
             for col in (3, 4):  # 轮数 / 模型：自适应内容
                 if col not in self._user_widths:
                     self.tree.resizeColumnToContents(col)
-            defaults = {1: 90, 2: 90, 5: 60, 6: 60}  # 角色/时间 90，大小/状态 60
+            defaults = {1: 100, 2: 110, 5: 70, 6: 70}  # 角色100 时间110 大小70 状态70
             for col, w in defaults.items():
                 if col not in self._user_widths:
                     header.resizeSection(col, w)
             if 0 not in self._user_widths:
-                header.resizeSection(7, 60)  # 操作列默认宽（标题是吸收器时）
+                header.resizeSection(6, 70)  # 状态列默认宽（标题是吸收器时）
         finally:
             self._applying_layout = False
         self._rebalance()
+
+    def _render_totals(self, live_color):
+        """总数 stat 集群：会话数 / 体积 / 运行中（运行中用呼吸红点）。搜索时加匹配数。"""
+        parts = []
+        if self.edit_search.text().strip():
+            parts.append(f'<b>{len(self.sessions)}</b> 个匹配')
+        parts.append(f'<b>{self._totals["count"]}</b> 个会话')
+        parts.append(fmt_size(self._totals['sizeBytes']))
+        if self._totals['liveCount'] > 0:
+            parts.append(f'<span style="color:{live_color.name()}; font-weight:600;">'
+                         f'● {self._totals["liveCount"]} 运行中</span>')
+        self.lbl_totals.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_totals.setText(' · '.join(parts))
 
     def _rebuild_tree(self):
         self._suppress = True
@@ -267,6 +363,7 @@ class SessionPanel(QWidget):
                 expanded.add(it.text(0))
         self.tree.clear()
         self._role_map = role_store.session_role_map()
+        self._provider_map = self.service.provider_map(self.sessions)
         groups = {}
         for s in self.sessions:
             groups.setdefault(s.projectPath, []).append(s)
@@ -285,19 +382,19 @@ class SessionPanel(QWidget):
                 row = QTreeWidgetItem()
                 row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 if s.isLive:
-                    row.setCheckState(0, Qt.CheckState.Unchecked)
-                    row.setDisabled(True)
+                    # 运行中：去掉勾选框但不禁用（禁用色会覆盖 setForeground 的呼吸色）
+                    row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 else:
                     row.setCheckState(0, Qt.CheckState.Checked if s.id in self.selected else Qt.CheckState.Unchecked)
                 row.setData(0, Qt.ItemDataRole.UserRole, s.id)
                 if s.isSpawned:
                     spawned_txt = s.projectPath + ' · 运行中（等待首次输入）'
-                    row.setText(0, trunc(spawned_txt, 70))
+                    row.setText(0, trunc(spawned_txt, 110))
                     row.setToolTip(0, spawned_txt)
                     row.setForeground(0, QBrush(QColor(COLOR_EMPTY)))
                 else:
                     full_title = s.title or '(空会话)'
-                    row.setText(0, trunc(full_title, 80))
+                    row.setText(0, trunc(full_title, 120))
                     row.setToolTip(0, full_title)
                     if not s.title:
                         row.setForeground(0, QBrush(QColor(COLOR_EMPTY)))
@@ -305,8 +402,9 @@ class SessionPanel(QWidget):
                 if role:
                     row.setText(1, role)
                     row.setToolTip(1, f'由角色 {role} 启动')
+                    row.setIcon(1, role_icon_full(role, role_store.role_icon_path(role), 16))
                     row.setForeground(1, QBrush(QColor(COLOR_MUTED)))
-                row.setText(2, fmt_time(s.lastTime))
+                row.setText(2, fmt_relative(s.lastTime))
                 if s.lastTime:
                     row.setToolTip(2, s.lastTime)
                 turns_txt = '等待输入' if s.isSpawned else f"{s.userCount} 问 / {s.assistantCount} 答"
@@ -315,6 +413,9 @@ class SessionPanel(QWidget):
                 row.setText(4, trunc(' '.join(s.models), 40))
                 if s.models:
                     row.setToolTip(4, ' '.join(s.models))
+                prov = self._provider_map.get(s.id)
+                if prov:
+                    row.setIcon(4, provider_icon(prov))
                 size_txt = '' if s.isSpawned else fmt_size(s.sizeBytes)
                 row.setText(5, size_txt)
                 if s.isSpawned:
@@ -325,15 +426,11 @@ class SessionPanel(QWidget):
                     row.setText(6, '● LIVE')
                     row.setToolTip(6, '正在运行')
                     row.setForeground(6, QBrush(QColor(COLOR_LIVE)))
+                    row.setData(0, LIVE_ROLE, True)  # 浅红底衬（delegate 绘制）
                 else:
-                    row.setText(6, '')
+                    row.setText(6, '已结束')
+                    row.setForeground(6, QBrush(QColor(COLOR_MUTED)))
                 head.addChild(row)
-                if not s.isLive:
-                    btn = QPushButton('恢复')
-                    btn.setObjectName('btnResume')
-                    btn.setFixedWidth(48)
-                    btn.clicked.connect(lambda _=False, sid=s.id: self.on_resume(sid))
-                    self.tree.setItemWidget(row, 7, btn)
         if not expanded:
             self.tree.expandAll()
         else:
@@ -341,10 +438,18 @@ class SessionPanel(QWidget):
                 self.tree.topLevelItem(i).setExpanded(self.tree.topLevelItem(i).text(0) in expanded)
         self.tree.blockSignals(False)
         self._suppress = False
-        self.lbl_totals.setText(
-            f"{self._totals['count']} 个会话 · {fmt_size(self._totals['sizeBytes'])} · "
-            f"{self._totals['liveCount']} 个运行中")
+        self._render_totals(QColor(COLOR_LIVE))
         self._apply_layout()
+        # 空状态提示：搜索过滤无结果 vs 真无会话
+        if self.tree.topLevelItemCount() == 0:
+            if self.edit_search.text().strip():
+                self.empty_hint.setText('无匹配的会话')
+            else:
+                self.empty_hint.setText('暂无会话\n点击「新建会话」开始')
+            self.empty_hint.set_empty(True)
+        else:
+            self.empty_hint.set_empty(False)
+        self._entrance_fade()
 
     def _group_state(self, rows):
         ids = [r.id for r in rows if not r.isLive]
@@ -405,7 +510,7 @@ class SessionPanel(QWidget):
         self._update_group_check(item.parent())
 
     def _on_item_clicked(self, item, column):
-        if self._suppress or column == 7:
+        if self._suppress:
             return
         sid = item.data(0, Qt.ItemDataRole.UserRole)
         if not sid:
@@ -435,12 +540,13 @@ class SessionPanel(QWidget):
         self._last_cwd = cwd
         inherit_ids = dlg.inherit_ids()
         inherit_path = self.service.build_inherit(inherit_ids) if inherit_ids else None
-        spawned = self.service.new_session(cwd, provider, inherit_path=inherit_path)
+        spawned = self.service.new_session(cwd, provider, mode=dlg.mode(), inherit_path=inherit_path)
         if spawned is None:
             QMessageBox.warning(self, '启动失败', f'无法启动终端（目录：{cwd}）')
             return
+        mode_txt = '危险模式' if dlg.mode() == 'danger' else '正常模式'
         suffix = f'，继承 {len(inherit_ids)} 个会话' if inherit_ids else ''
-        self.status_message.emit(f'已在新终端启动会话（{cwd}，{provider}{suffix}）', 3000)
+        self.status_message.emit(f'已在新终端启动会话（{cwd}，{provider}，{mode_txt}{suffix}）', 3000)
         self._rescan()
         QTimer.singleShot(2500, self._rescan)
 
@@ -464,9 +570,85 @@ class SessionPanel(QWidget):
         self.selected = set()
         self._rescan()
 
-    def on_select_empty(self):
-        self.selected = self.service.select_empty(self.sessions)
-        self.status_message.emit(f'已选中 {len(self.selected)} 个空会话', 3000)
+    def _on_item_double_clicked(self, item, column):
+        """双击会话行 = 恢复（运行中由 on_resume 内部拦截）。"""
+        sid = item.data(0, Qt.ItemDataRole.UserRole)
+        if sid:
+            self.on_resume(sid)
+
+    def _show_session_menu(self, pos):
+        """右键菜单：启动（恢复）/ 打开所在目录 / 复制 ID / 删除。运行中的会话前两项禁用。"""
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        sid = item.data(0, Qt.ItemDataRole.UserRole)
+        if not sid:
+            return  # 分组标题行不弹菜单
+        s = self._by_id.get(sid)
+        menu = FadeMenu(self)
+        act_start = menu.addAction(ui_icon('play', 15, '#d4d4d8'), '启动（恢复）')
+        act_open = menu.addAction(ui_icon('folder-open', 15, '#d4d4d8'), '打开所在目录')
+        act_copy = menu.addAction(ui_icon('copy', 15, '#d4d4d8'), '复制会话 ID')
+        menu.addSeparator()
+        act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
+        if s and s.isLive:
+            act_start.setEnabled(False)
+            act_del.setEnabled(False)
+        if not (s and s.projectPath and os.path.isdir(s.projectPath)):
+            act_open.setEnabled(False)
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if chosen == act_start:
+            self.on_resume(sid)
+        elif chosen == act_open:
+            self._open_project_dir(sid, s)
+        elif chosen == act_copy:
+            QApplication.clipboard().setText(sid)
+            self.status_message.emit('会话 ID 已复制', 2000)
+        elif chosen == act_del:
+            self._delete_session(sid)
+
+    def _open_project_dir(self, sid, s=None):
+        if s is None:
+            s = self._by_id.get(sid)
+        proj = s.projectPath if s else ''
+        if proj and os.path.isdir(proj):
+            os.startfile(proj)
+        else:
+            self.status_message.emit('项目目录不存在', 3000)
+
+    def _delete_session(self, sid):
+        s = self._by_id.get(sid)
+        title = (s.title if s else '') or '(空会话)'
+        proj = (s.projectPath if s else '') or '未知项目'
+        dlg = DeleteDialog([(title, proj)], s.sizeBytes if s else 0, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        res = self.service.delete([sid])
+        if res['deleted']:
+            self.status_message.emit('会话已删除', 3000)
+        self._rescan()
+
+    def on_clean_empty(self):
+        """一键清理空会话：列出空会话（0 回复且非运行中）→ 确认 → 删除。"""
+        empties = [s for s in self.sessions if s.isEmpty and not s.isLive]
+        if not empties:
+            self.status_message.emit('没有空会话', 3000)
+            return
+        ids = [s.id for s in empties]
+        items = [(s.title or '(空会话)', s.projectPath) for s in empties]
+        total = sum(s.sizeBytes for s in empties)
+        dlg = DeleteDialog(items, total, self, title='清理空会话', confirm_text='确认清理',
+                           intro=f'清理 {len(empties)} 个空会话？将释放约 {fmt_size(total)}：')
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        res = self.service.delete(ids)
+        if res['deleted']:
+            self.status_message.emit(
+                f"已清理 {len(res['deleted'])} 个空会话，释放 {fmt_size(res['totalFreed'])}"
+                + (f"，{len(res['errors'])} 个失败" if res['errors'] else ''), 5000)
+        else:
+            self.status_message.emit('没有空会话被删除', 3000)
+        self.selected = set()
         self._rescan()
 
     def on_resume(self, sid):

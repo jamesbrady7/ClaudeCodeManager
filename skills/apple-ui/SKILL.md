@@ -1,5 +1,6 @@
 ---
 name: apple-ui
+category: 界面设计
 description: Apple/macOS 设计规范
 ---
 

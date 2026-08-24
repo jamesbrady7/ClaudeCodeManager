@@ -14,7 +14,7 @@ from dataclasses import replace
 import psutil
 
 from ccui.infra.config import CONFIG_DIR, PROJECTS, SESSIONS_DIR, HISTORY, CLAUDE_JSON, log
-from ccui.infra.utils import munge, norm_path, best_effort_decode, iso_to_ms, ms_to_iso
+from ccui.infra.utils import munge, norm_path, best_effort_decode, iso_to_ms, ms_to_iso, text_content
 from ccui.session.data.models import Session, SpawnedSession
 from ccui.session.data.provider import record_session_provider
 
@@ -30,7 +30,18 @@ BECAME_REAL_SLACK = 5_000                # firstTime >= startedAt - 5s 视为转
 # 路径 / 解析
 # ------------------------------------------------------------
 
+_revmap_cache = {'key': None, 'map': {}}
+
+
 def build_reverse_map():
+    """项目目录名 → 真实路径。.claude.json 未变时走缓存，避免每次 scan 全读。"""
+    try:
+        st = os.stat(CLAUDE_JSON)
+        key = (st.st_mtime, st.st_size)
+    except Exception:
+        return {}
+    if _revmap_cache.get('key') == key:
+        return _revmap_cache['map']
     m = {}
     try:
         with open(CLAUDE_JSON, 'r', encoding='utf-8-sig') as f:
@@ -39,6 +50,8 @@ def build_reverse_map():
             m[munge(real)] = real
     except Exception:
         pass
+    _revmap_cache['key'] = key
+    _revmap_cache['map'] = m
     return m
 
 
@@ -211,19 +224,6 @@ def locate_session(sid):
 # 扫描 / 摘要
 # ------------------------------------------------------------
 
-def _text_content(message):
-    if not isinstance(message, dict):
-        return ''
-    c = message.get('content')
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        for blk in c:
-            if isinstance(blk, dict) and blk.get('type') == 'text' and blk.get('text'):
-                return str(blk['text'])
-    return ''
-
-
 _SUMMARY_CACHE = {}
 
 
@@ -253,6 +253,8 @@ def _parse_transcript(path):
     user_count = 0
     assistant_count = 0
     models = set()
+    now_ms = int(time.time() * 1000)
+    future_slack_ms = 3600 * 1000  # 允许 1 小时时钟偏差，忽略异常未来时间戳
     for line in re.split(r'\r?\n', raw):
         if not line.strip():
             continue
@@ -264,14 +266,16 @@ def _parse_transcript(path):
             continue
         ts = o.get('timestamp')
         if ts:
-            if not first_time or ts < first_time:
-                first_time = ts
-            if ts > last_time:
-                last_time = ts
+            ts_ms = iso_to_ms(ts)
+            if ts_ms and ts_ms <= now_ms + future_slack_ms:  # 未来时间戳视为脏数据
+                if not first_time or ts < first_time:
+                    first_time = ts
+                if ts > last_time:
+                    last_time = ts
         if o.get('type') == 'user':
             user_count += 1
             if not title:
-                title = _text_content(o.get('message'))
+                title = text_content(o.get('message'))
             if not cwd and o.get('cwd'):
                 cwd = o['cwd']
         elif o.get('type') == 'assistant':
@@ -465,10 +469,14 @@ def delete_many(ids):
 # ------------------------------------------------------------
 
 def detect_permission_mode(sid):
+    """返回会话最近一次启动的权限模式（'danger' / 'normal'）。
+
+    transcript 里模式以独立条目记录：{"type":"permission-mode","permissionMode":"bypassPermissions"}。
+    """
     found = locate_session(sid)
     if not found:
         return 'normal'
-    counts = {}
+    last_pm = None
     try:
         with open(found[0]['path'], 'r', encoding='utf-8-sig', errors='replace') as f:
             for line in f:
@@ -478,12 +486,8 @@ def detect_permission_mode(sid):
                     o = json.loads(line)
                 except Exception:
                     continue
-                if isinstance(o, dict) and o.get('type') == 'user' and o.get('permissionMode'):
-                    pm = str(o['permissionMode'])
-                    counts[pm] = counts.get(pm, 0) + 1
+                if isinstance(o, dict) and o.get('type') == 'permission-mode' and o.get('permissionMode'):
+                    last_pm = str(o['permissionMode'])
     except Exception:
         pass
-    if not counts:
-        return 'normal'
-    top = max(counts, key=counts.get)
-    return 'danger' if top == 'bypassPermissions' else 'normal'
+    return 'danger' if last_pm == 'bypassPermissions' else 'normal'

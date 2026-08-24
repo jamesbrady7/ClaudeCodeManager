@@ -109,6 +109,38 @@ def draw_splash_pixmap():
     return pm
 
 
+def spark_pixmap(size):
+    """单个 Claude spark 小可爱的透明 pixmap（空状态等复用，品牌一致）。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    _draw_cute_spark(p, size / 2, size / 2, size * 0.42)
+    p.end()
+    return pm
+
+
+def warning_pixmap(size):
+    """小三角警告图标（警示场景，替代 emoji ⚠）。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tri = QPainterPath(QPointF(size / 2, size * 0.08))
+    tri.lineTo(size * 0.94, size * 0.90)
+    tri.lineTo(size * 0.06, size * 0.90)
+    tri.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor('#ff9f0a')))
+    p.drawPath(tri)
+    p.setPen(QPen(QColor('#2b1d18'), max(1.6, size * 0.09), Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(size / 2, size * 0.34), QPointF(size / 2, size * 0.62))
+    p.drawPoint(QPointF(size / 2, size * 0.76))
+    p.end()
+    return pm
+
+
 class SplashScreen(QSplashScreen):
     """启动飞屏：置顶显示可爱画面，支持阶段状态文案。"""
 

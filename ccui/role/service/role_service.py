@@ -7,6 +7,7 @@ import os
 import uuid
 import datetime
 
+from ccui.infra.config import ROLES_DIR
 from ccui.infra.process import spawn_terminal
 from ccui.infra.signalhub import SignalHub
 from ccui.role.data import store as role_store
@@ -22,16 +23,18 @@ def _now_iso():
 
 def _persona_template(name, desc, skills_text=''):
     """角色人设模板（与 cc-role.ps1 一致），可追加技能段。"""
+    knowledge = os.path.join(ROLES_DIR, name, 'knowledge.md')  # 用真实配置路径，勿硬编码
+    inherit = os.path.join(ROLES_DIR, name, 'inherit.md')
     t = f"""# 角色：{name}
 
 {desc}
 
 你是 {name}，一个拥有长期记忆的资深专家。你的知识库文件是：
-D:\\ClaudeCode\\roles\\{name}\\knowledge.md
+{knowledge}
 
 ## 会话开始
-每次会话开始时，第一步用 Read 阅读知识库 D:\\ClaudeCode\\roles\\{name}\\knowledge.md。
-若存在 D:\\ClaudeCode\\roles\\{name}\\inherit.md，一并阅读它（那是本次继承的要点）。
+每次会话开始时，第一步用 Read 阅读知识库 {knowledge}。
+若存在 {inherit}，一并阅读它（那是本次继承的要点）。
 不要复述知识库内容，直接运用。
 
 ## 自动学习（重要）
@@ -116,8 +119,30 @@ class RoleService:
         # persona.md 只存基础人设；技能由启动器（cc-role.ps1）动态注入，避免重复
         role_store.write_persona(name, _persona_template(name, meta['description']))
         role_store.write_knowledge(name, _knowledge_template(name))
+        role_store.set_default_icon(name)  # 默认用图标库第一个 SVG 作头像
         SignalHub.instance().emit('roles.changed')
         return {'ok': True}
+
+    def update_role(self, name, new_name, description, icon_path=None):
+        """编辑角色信息：可选重命名 + 描述 + 图标。"""
+        new_name = (new_name or name).strip()
+        if not new_name or not role_store.NAME_RE.match(new_name) or new_name in RESERVED_NAMES:
+            return {'ok': False, 'error': 'invalid-name'}
+        if new_name != name and os.path.exists(role_store.role_dir(new_name)):
+            return {'ok': False, 'error': 'exists'}
+        if new_name != name:
+            try:
+                os.rename(role_store.role_dir(name), role_store.role_dir(new_name))
+            except Exception as e:
+                return {'ok': False, 'error': f'rename: {e}'}
+        meta = role_store.read_meta(new_name)
+        meta['name'] = new_name
+        meta['description'] = description or f'角色 {new_name}'
+        role_store.write_meta(new_name, meta)
+        if icon_path:
+            role_store.write_role_icon(new_name, icon_path)
+        SignalHub.instance().emit('roles.changed')
+        return {'ok': True, 'name': new_name}
 
     def delete_role(self, name):
         if not name or not role_store.NAME_RE.match(name):
@@ -129,11 +154,21 @@ class RoleService:
         SignalHub.instance().emit('roles.changed')
         return {'ok': True}
 
-    def start_role(self, name, from_ids=None):
+    def set_role_icon(self, name, src):
+        """设置角色自定义图标（复制为 roles/<name>/icon.png）。"""
+        if not name or not role_store.NAME_RE.match(name):
+            return {'ok': False, 'error': 'invalid-name'}
+        role_store.write_role_icon(name, src)
+        SignalHub.instance().emit('roles.changed')
+        return {'ok': True}
+
+    def start_role(self, name, from_ids=None, cwd=None, mode='normal'):
         args = ['cc', 'role', name]
         if from_ids:
             args += ['--from', ','.join(from_ids)]
-        return spawn_terminal(args, os.path.dirname(role_store.ROLES_DIR))
+        if mode == 'danger':
+            args += ['--mode', 'danger']
+        return spawn_terminal(args, cwd or os.path.dirname(role_store.ROLES_DIR))
 
     # ---- 技能 ----
     def list_skills(self, role_name=None):
@@ -145,6 +180,7 @@ class RoleService:
             if info:
                 seen.add(n)
                 out.append(Skill(name=n, description=info['description'],
+                                 category=info.get('category', ''),
                                  path=info['path'], source='global'))
         if role_name:
             for n in role_store.list_role_skill_names(role_name):
@@ -153,6 +189,7 @@ class RoleService:
                 info = role_store.read_skill(n, role_name)
                 if info:
                     out.append(Skill(name=n, description=info['description'],
+                                     category=info.get('category', ''),
                                      path=info['path'], source='role'))
         return out
 
@@ -161,6 +198,7 @@ class RoleService:
         if not info:
             return None
         return Skill(name=info['name'], description=info['description'],
+                     category=info.get('category', ''),
                      content=info['content'], body=info.get('body', ''),
                      path=info['path'], source=info['source'])
 
@@ -184,6 +222,6 @@ class RoleService:
         role_store.write_knowledge(name, content)
         return {'ok': True}
 
-    def create_skill(self, name, description, body, role_name=None):
-        role_store.create_skill(name, description, body, role_name)
+    def create_skill(self, name, description, body, role_name=None, category=''):
+        role_store.create_skill(name, description, body, role_name, category)
         return {'ok': True}
