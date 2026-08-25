@@ -12,7 +12,6 @@ from ccui.infra.process import spawn_terminal
 from ccui.infra.signalhub import SignalHub
 from ccui.role.data import store as role_store
 from ccui.role.data.manager import RoleManager
-from ccui.role.data.models import Skill
 
 RESERVED_NAMES = {'new', 'list', 'ls', 'help', 'rm', 'roles', 'role'}
 
@@ -21,8 +20,8 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
 
-def _persona_template(name, desc, skills_text=''):
-    """角色人设模板（与 cc-role.ps1 一致），可追加技能段。"""
+def _persona_template(name, desc):
+    """角色人设模板（与 cc-role.ps1 一致）。"""
     knowledge = os.path.join(ROLES_DIR, name, 'knowledge.md')  # 用真实配置路径，勿硬编码
     inherit = os.path.join(ROLES_DIR, name, 'inherit.md')
     t = f"""# 角色：{name}
@@ -55,8 +54,6 @@ def _persona_template(name, desc, skills_text=''):
 ## 会话结束
 会话末尾回顾本次工作，如有值得沉淀的知识，先更新知识库再结束。
 """
-    if skills_text:
-        t += '\n' + skills_text
     t += '\n现在，请先 Read 知识库文件，然后等待任务。\n'
     return t
 
@@ -77,27 +74,6 @@ def _knowledge_template(name):
 ## 开始
 （此处随会话积累）
 """
-
-
-def _build_skills_text(role_name, skills):
-    """根据技能名生成 persona 技能段：角色专属带路径引用，全局列名字+描述。"""
-    if not skills:
-        return ''
-    lines = ['## 特化技能', '你掌握以下技能：']
-    found = 0
-    for skill in skills:
-        info = role_store.read_skill(skill, role_name)
-        if not info:
-            continue
-        found += 1
-        desc = info['description'] or '（无描述）'
-        if info['source'] == 'role':
-            lines.append(f'- **{skill}**（{desc}）：执行相关任务时先 Read `{info["path"]}` 并遵循其指令。')
-        else:
-            lines.append(f'- **{skill}**（{desc}）：相关任务时调用该技能。')
-    if not found:
-        return ''
-    return '\n'.join(lines)
 
 
 class RoleService:
@@ -170,49 +146,17 @@ class RoleService:
             args += ['--mode', 'danger']
         return spawn_terminal(args, cwd or os.path.dirname(role_store.ROLES_DIR))
 
-    # ---- 技能 ----
-    def list_skills(self, role_name=None):
-        """列出技能：role_name 给定时 = 全局 + 该角色专属；否则只列全局。"""
-        seen = set()
-        out = []
-        for n in role_store.list_global_skill_names():
-            info = role_store.read_skill(n)
-            if info:
-                seen.add(n)
-                out.append(Skill(name=n, description=info['description'],
-                                 category=info.get('category', ''),
-                                 path=info['path'], source='global'))
-        if role_name:
-            for n in role_store.list_role_skill_names(role_name):
-                if n in seen:
-                    continue
-                info = role_store.read_skill(n, role_name)
-                if info:
-                    out.append(Skill(name=n, description=info['description'],
-                                     category=info.get('category', ''),
-                                     path=info['path'], source='role'))
-        return out
+    # ---- 技能（uuid 引用，业务在 skill 模块；这里只把 uuid 当不透明数组写入 meta）----
+    def update_role_skills(self, name, skill_uuids):
+        """更新角色引用的技能 uuid 数组并广播 roles.changed。
 
-    def get_skill(self, name, role_name=None):
-        info = role_store.read_skill(name, role_name)
-        if not info:
-            return None
-        return Skill(name=info['name'], description=info['description'],
-                     category=info.get('category', ''),
-                     content=info['content'], body=info.get('body', ''),
-                     path=info['path'], source=info['source'])
-
-    def update_skills(self, name, skills):
-        """更新角色的技能列表，并重新生成 persona（含技能段）。"""
+        技能内容/解析在 skill 模块；persona 保持基础人设（技能由
+        track-session.ps1 启动时按 uuid 注入）。
+        """
         meta = role_store.read_meta(name)
-        meta['skills'] = [s for s in (skills or []) if s]
+        meta['skills'] = [u for u in (skill_uuids or []) if u]
         role_store.write_meta(name, meta)
-        # persona.md 保持基础人设（技能由启动器动态注入）
-        role_store.write_persona(name, _persona_template(name, meta.get('description', f'角色 {name}')))
-        return {'ok': True}
-
-    def write_skill(self, name, content, role_name=None):
-        role_store.write_skill(name, content, role_name)
+        SignalHub.instance().emit('roles.changed')
         return {'ok': True}
 
     def get_knowledge(self, name):
@@ -222,6 +166,13 @@ class RoleService:
         role_store.write_knowledge(name, content)
         return {'ok': True}
 
-    def create_skill(self, name, description, body, role_name=None, category=''):
-        role_store.create_skill(name, description, body, role_name, category)
-        return {'ok': True}
+    def export_role(self, name, out_path):
+        """导出角色（白名单 zip）。"""
+        return role_store.export_role_to_zip(name, out_path)
+
+    def import_role(self, zip_path, mode='skip', new_name=''):
+        """从 zip 导入角色，成功后广播 roles.changed。"""
+        res = role_store.import_role_from_zip(zip_path, mode=mode, new_name=new_name)
+        if res.get('ok'):
+            SignalHub.instance().emit('roles.changed')
+        return res

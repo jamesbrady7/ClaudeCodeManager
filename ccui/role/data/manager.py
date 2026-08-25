@@ -5,9 +5,10 @@ map：name -> Role；每个 Role 持有该角色追踪的会话 uuid 列表（�
 本模块**不 import 任何 session 模块**，保证各模块 Data/Service 层隔离。
 """
 import uuid as uuidlib
-import datetime
+import time
 
 from ccui.infra.signalhub import SignalHub
+from ccui.infra.utils import iso_to_ms
 from ccui.role.data import store as role_store
 from ccui.role.data.models import Role
 
@@ -85,7 +86,7 @@ class RoleManager:
         existing_ids 由 View 传入（真实 transcript 的 uuid ∪ 运行中 uuid）。
         """
         tracked = role_store.role_sessions_from_file(name)
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now_ms = int(time.time() * 1000)
         kept = []
         removed = []
         for t in tracked:
@@ -93,13 +94,12 @@ class RoleManager:
             if sid in existing_ids:
                 kept.append(t)
                 continue
-            ts = t.get('timestamp', '')
-            try:
-                dt = datetime.datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                stale = (now - dt).total_seconds() >= min_age_seconds
-            except Exception:
-                stale = True  # 无法解析时间的记录一并清掉
-            if stale:
+            ts_ms = iso_to_ms(t.get('timestamp', ''))
+            # 关键：hook 写的时间戳是 7 位小数（ToString('o')），Python 3.9 的
+            # fromisoformat 只接受 ≤6 位 → 会抛异常被当「无法解析」→ stale=True
+            # → 绕过 10 分钟年龄守卫，误删刚启动、transcript 尚未生成的会话记录。
+            # 改用 iso_to_ms（内部截断小数）后，年龄守卫生效：刚启动的保留。
+            if not ts_ms or (now_ms - ts_ms) >= min_age_seconds * 1000:
                 removed.append(sid)
             else:
                 kept.append(t)

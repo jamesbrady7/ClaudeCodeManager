@@ -31,7 +31,6 @@ class LiveRowDelegate(QStyledItemDelegate):
 from ccui.infra.config import PROJECTS, SESSIONS_DIR, HISTORY, CLAUDE_JSON, READONLY, log
 from ccui.infra.signalhub import SignalHub
 from ccui.infra.utils import iso_to_ms, norm_path
-from ccui.session.data import store
 from ccui.session.data.manager import SessionManager
 from ccui.session.data.models import Session
 from ccui.session.service.session_service import SessionService
@@ -111,6 +110,18 @@ class SessionPanel(QWidget):
         self.btn_empty.setToolTip('一键删除所有空会话（有确认）')
         self.btn_empty.clicked.connect(self.on_clean_empty)
         toolbar.addWidget(self.btn_empty)
+        # 导出/导入（zip）
+        self.btn_export = QPushButton(' 导出')
+        self.btn_export.setIcon(ui_icon('download', 14, '#c8c8cc'))
+        self.btn_export.setToolTip('导出选中会话为 zip')
+        self.btn_export.clicked.connect(self._export_selected)
+        toolbar.addWidget(self.btn_export)
+        self.btn_import = QPushButton(' 导入')
+        self.btn_import.setIcon(ui_icon('upload', 14, '#c8c8cc'))
+        self.btn_import.setToolTip('从 zip 导入会话')
+        self.btn_import.clicked.connect(self._import_sessions)
+        self.btn_import.setEnabled(not READONLY)
+        toolbar.addWidget(self.btn_import)
         toolbar.addStretch(1)
         self.lbl_totals = QLabel('')
         self.lbl_totals.setObjectName('totals')
@@ -121,7 +132,7 @@ class SessionPanel(QWidget):
         self.edit_search.setClearButtonEnabled(True)
         self.edit_search.addAction(ui_icon('search', 14, '#6b6b70'),
                                    QLineEdit.ActionPosition.LeadingPosition)
-        self.edit_search.textChanged.connect(self._rescan)
+        self.edit_search.textChanged.connect(self._schedule_rescan)  # 防抖：打字不逐键全量重建
         toolbar.addWidget(self.edit_search)
         root.addWidget(toolbar_bar)
 
@@ -589,11 +600,13 @@ class SessionPanel(QWidget):
         act_start = menu.addAction(ui_icon('play', 15, '#d4d4d8'), '启动（恢复）')
         act_open = menu.addAction(ui_icon('folder-open', 15, '#d4d4d8'), '打开所在目录')
         act_copy = menu.addAction(ui_icon('copy', 15, '#d4d4d8'), '复制会话 ID')
+        act_export = menu.addAction(ui_icon('download', 15, '#d4d4d8'), '导出')
         menu.addSeparator()
         act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
         if s and s.isLive:
             act_start.setEnabled(False)
             act_del.setEnabled(False)
+            act_export.setEnabled(False)
         if not (s and s.projectPath and os.path.isdir(s.projectPath)):
             act_open.setEnabled(False)
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -604,6 +617,8 @@ class SessionPanel(QWidget):
         elif chosen == act_copy:
             QApplication.clipboard().setText(sid)
             self.status_message.emit('会话 ID 已复制', 2000)
+        elif chosen == act_export:
+            self._export_session_ids([sid])
         elif chosen == act_del:
             self._delete_session(sid)
 
@@ -649,6 +664,40 @@ class SessionPanel(QWidget):
         else:
             self.status_message.emit('没有空会话被删除', 3000)
         self.selected = set()
+        self._rescan()
+
+    def _export_session_ids(self, ids):
+        if not ids:
+            self.status_message.emit('未选择可导出的会话', 3000)
+            return
+        path, _ = QFileDialog.getSaveFileName(self, '导出会话', 'sessions-export.zip',
+                                              'Zip 档案 (*.zip)')
+        if not path:
+            return
+        res = self.service.export_sessions(ids, path)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '导出失败', res.get('error', '未知错误'))
+            return
+        self.status_message.emit(
+            f"已导出 {len(res['exported'])} 个会话" + (f"，{len(res['skipped'])} 个跳过"
+                                                     if res['skipped'] else ''), 4000)
+
+    def _export_selected(self):
+        ids = [x for x in self.selected if x in self._by_id and not self._by_id[x].isLive]
+        self._export_session_ids(ids)
+
+    def _import_sessions(self):
+        path, _ = QFileDialog.getOpenFileName(self, '导入会话', '', 'Zip 档案 (*.zip)')
+        if not path:
+            return
+        res = self.service.import_session(path)
+        if not res.get('ok'):
+            QMessageBox.warning(self, '导入失败', res.get('error', '未知错误'))
+            return
+        msg = f"已导入 {len(res['imported'])} 个会话"
+        if res.get('conflicts'):
+            msg += f"；{len(res['conflicts'])} 个已存在跳过"
+        self.status_message.emit(msg, 5000)
         self._rescan()
 
     def on_resume(self, sid):

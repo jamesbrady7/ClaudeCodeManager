@@ -8,6 +8,7 @@
   sessions.changed       会话数据/状态变化（创建/删除/恢复/占位登记）
   roles.changed          角色列表变化（增删角色）
   role.sessions.changed  某角色追踪的会话记录变化（payload: name）
+  skills.changed         技能库增删改/导入导出
 """
 from ccui.infra.config import log
 

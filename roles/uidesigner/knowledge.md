@@ -46,6 +46,8 @@
 ## 时间戳坑（iso_to_ms）
 - **Python 3.9 的 `fromisoformat` 只接受 ≤6 位小数**；hook 写 7 位（`7685894Z`）→ 解析失败返回 0 → 角色面板「物化判定」失灵 → 双启动中
 - 修复：先分离纯小数与**时区后缀**（Z/±HH:MM），截断小数到 6 位再拼后缀；别把 Z 截掉，否则按本地时间解析差 8h
+- **漏网之鱼 `prune_stale`（role/data/manager.py）**：曾直接用裸 `fromisoformat` 解析 sessions.jsonl 的 7 位小数 → 抛 ValueError → `except: stale=True` **绕过 10 分钟年龄守卫**，把刚启动（transcript 尚未生成、sid 不在 existing_ids）的会话记录**立即误删** → 症状=角色面板丢会话 + 会话面板角色列丢。修复：改用 `iso_to_ms`（内部截断小数），年龄守卫恢复生效
+- **排查手法**：transcript 里找 `【角色系统】你是 <名>` 标记即可反推「哪个角色会话丢了关联」；记录可从 transcript 首条 timestamp + cwd 重建 sessions.jsonl（去重追加）
 
 ## 设计技能（Emil Kowalski）
 - 已装 6 个技能：emil-design-eng（核心）/ animate / apple-design / animation-vocabulary / find-animation-opportunities / review-animations，挂到 uidesigner 角色
@@ -200,3 +202,82 @@
 - 排查方法：`roles/<role>/sessions.jsonl` 取最近 session_id → 找 transcript → 第一条 user 消息若是 'danger' 即命中此 bug；验证用 `CC_CLAUDE_BIN=<mock>` 跑 cc-role.ps1 看 claude 实际收到的参数
 - 注意：`cc danger --resume`（session_service.resume）走 cc.cmd :danger 分支是正确的（`claude --dangerously-skip-permissions --resume`），只有 cc-role.ps1 直调 claude 时踩坑
 - **Tab 内容淡切**：`QTabWidget.currentChanged` → 新面板 QGraphicsOpacityEffect + QPropertyAnimation 200ms OutCubic，**动画结束必须 `setGraphicsEffect(None)` 移除**（防常驻栅格化）；在 addTab 之后再连线，避免首次触发
+
+## 技能独立模块化（P1）
+- **技能是一等公民**：新增 `ccui/skill/`（data/models+store+manager / service/skill_service / view/dialogs），技能存全局 `skills/<name>/SKILL.md`，frontmatter 加 `uuid:`（稳定身份），角色 meta.json 的 `skills` 从名字数组改为 **uuid 数组**
+- **角色按 uuid 引用技能**：改名/换目录不破坏引用；`role_service.update_role_skills(name, uuids)` 只写 meta（技能业务全在 skill 模块，隔离）
+- **迁移** `ccui/skill/migrate.py`：幂等（技能逐行注入 uuid + 角色 meta 名→uuid），prewarm 里自动自愈；`SkillManager` 加载时对缺 uuid 的技能自动回填
+- **frontmatter 解析保留未知键**：`parse_frontmatter/serialize_skill` 逐行处理，多行 `metadata:` 子键和 argument-hint/license 等字节原样保留（编辑技能不丢键）；`serialize_skill` 用 `raw_front.strip('\n')`（否则 `---\n\nname:` 空行影响外部 skill 加载器）
+- **track-session.ps1 按 uuid 解析**：`Get-SkillMap` 扫所有技能建 uuid→路径+名→路径双映射，`Get-RoleSkillsText` 按 uuid 解析、**缺失优雅跳过**（未导入技能不出现在技能段）；兼容迁移前旧名字
+- 角色专属技能（roles/<role>/skills/）废弃；`SKILL_CATEGORY_LABELS`/`infer_skill_category` 迁到 skill 模块
+- SignalHub 新增 `skills.changed` 事件；SkillGroupList 改为 uuid 标识（checked_ids/selected_uuids/current_skill_uuid/doubleClickedSkill 发 uuid）
+
+## 技能 tab + 三资产导入导出（P2/P3）
+- **技能 tab**（`ccui/skill/view/skill_panel.py`，主窗口第 3 个 tab）：左按类分组树（行=名字—描述+N 角色引用）、右详情（名字/类型/uuid 可复制/描述/正文预览/被引用角色/编辑/重命名/删除/导出）；双击编辑、右键菜单
+- **导入导出：模块分离、不内嵌**（`ccui/infra/archive.py` 通用 zip 工具，manifest 约定 kind=cc.sessions/cc.skill/cc.role）
+  · 会话：export=transcript+同名子目录+file-history+tasks+telemetry（zip）；import 落盘 + `ensure_project_in_claude_json`（补 .claude.json 项目条目，保 eol 风格）；运行中拒绝覆盖、存在冲突返回
+  · 技能：export=整目录树；import 三模式 skip/overwrite/new_uuid（换 uuid 落盘，角色引用旧 uuid 优雅跳过）
+  · 角色：export **白名单** meta/persona/knowledge/icon/sessions.jsonl（**不含技能内容/transcript**）；import 后返回 skillUuids/sessionUuids，view 层检查缺失并弹摘要（技能未安装→去技能库导；会话不存在→追踪自动清理）
+- **安全**：`safe_extract_zip` 防 zip-slip（拒绝对路径/.. 成员）；`make_zip` 支持内联 3 元组写 manifest
+- **⚠️ 角色导入必须解包到临时目录再 move**：`os.rename` 跨盘（临时目录在 C:，roles 在 D:）会 WinError 17，且直接解到已有目录上再改名会**毁掉原角色**（实测把 uidesigner 目录改名删了，靠 git 恢复）——先 `tempfile.mkdtemp` 解包、`shutil.move` 到目标，原角色目录绝不触碰
+- **⚠️ QSplitter 必须显式 stretch**：`QVBoxLayout.addWidget(toolbarBar)` + `addWidget(splitter)`（不加 stretch）时，QSplitter 不吃拉伸，**工具栏 QFrame 被拉到整面板高**（skill tab 实测 375px、统计标签 365px 黑底）。修复 `addWidget(splitter, 1)`；会话面板是 `addWidget(tree)`（QTreeWidget 天然 Expanding）所以正常
+
+## 技能面板分组管理 + 批量导出（已实施）
+- **技能树勾选框批量导出**：技能行带勾选框（交互与会话表一致——勾选框切换选择、点行显示详情、分组头 tri-state 全选）；`_checked_names()` 收集勾选 → `export_skills_to_zip(names)` 批量导出一个 zip（manifest.skills 数组，兼容 v1 单技能）
+- **分组管理**：分组头带图标（`CATEGORY_ICONS`：动效动画 zap/界面设计 palette/设计系统 layers/品牌视觉 star/内容演示 presentation/综合 layout-grid/其他 folder）；「新建」按钮改下拉（新建技能/新建分组，`QPushButton.setMenu`）；分组右键=编辑分组/新增技能/删除分组，技能右键=编辑/删除
+- **自定义分组持久化** `skills/.categories.json`：新建的空分组也显示（预置 `SKILL_CATEGORY_LABELS` + 自定义索引）；`rename_category` 同步技能 frontmatter + 索引（uuid 不变）、`delete_category` 把技能移到「其他」+ 清索引
+- **NewSkillDialog 支持 `preset_category`**：从分组右键「新增技能」时预选该分组（自定义分组自动加进下拉）
+- **分组图标可配置**：`skills/.categories.json` 存 `{"categories": [...], "icons": {分组: 图标key}}`（兼容旧裸列表）；图标 key = Lucide 名（如 'zap'）或 role-icons 文件名（如 'claude-color.svg'）；分组右键「设置图标」→ `GroupIconPicker`（网格显示 assets/icons/ 65 个 Lucide + role-icons/ 17 个 SVG）；`_render_group_icon` 优先配置→CATEGORY_ICONS 默认→folder；重命名分组图标跟随、删除分组清图标
+
+## 双击/箭头交互修复（技能树）
+- **无延迟、行为分离**：延迟单机被移除（用户嫌太慢+勾选框/点行延迟不一致）。新模型——**分组勾选框=立即全选**（`_on_item_changed` 对 header 传播到子项）、**分组行单击=立即折叠/展开**（`expandItem/collapseItem`，勾选框点击用 `_changed_at` 守卫跳过）、**分组双击=Qt 默认折叠/展开且不编辑**（`_on_item_double_clicked` 仅技能行才编辑）、技能双击仍编辑
+- **分组收起/展开箭头**：`setRootIsDecorated(True)` + 作用域 QSS `QTreeWidget#skillGroupTree::branch:closed:has-children`（**chevron-right**，收起来朝右）/ `:open:has-children`（chevron-down）；着色版 SVG（currentColor→#9a9aa0）给 QSS image 用（QSS 不解析 currentColor 会画黑）
+- **「新建」下拉按钮指示器**：`QPushButton#btnNew::menu-indicator` 用 chevron-down-color.svg（与分组箭头风格一致）；QSS url 用 `os.path.join(ASSETS_DIR,...).replace(os.sep,'/')` 拼（QSS 需正斜杠）
+- **坑**：`QTreeWidget` 没有 `setItemExpanded`（QTreeView 才有）——折叠/展开用 `expandItem(item)`/`collapseItem(item)`
+
+## 架构/性能审查优化（MVC + 性能 + 复用）
+- **MVC 分层确认**：Data（store/manager=模型+仓储）→ Service（业务=控制器）→ View（Qt 控件=视图+编排）。隔离规则：Service 不跨模块 import（已验证 role/session/skill_service 各只依赖本模块 data + infra）；View 可跨模块调 Data/Service（如 skill_panel 用 RoleManager 算引用）
+- **`skill_refcounts` 从 skill 数据层移到 view**（skill_panel 的 `_ref_map()` 用 RoleManager）——之前 skill data 直接读 roles/*/meta.json 是跨模块数据依赖，违反"各模块 data 自包含"
+- **性能**：
+  · `ui_icon` 加 `_UI_ICON_CACHE`（(name,size,color)→QIcon）——树重建/工具栏热路径不再重复渲染 SVG
+  · 会话面板 + 技能面板的**搜索框加防抖**（textChanged → `_schedule_rescan/_schedule_reload` 走 debounce），打字不再逐键全量重建
+  · `_refs` 在 `_reload` 缓存一次，`_show_detail/_delete_current` 复用（不再每次重算引用）
+- **死代码清理**：移除 role/view/dialogs.py 的 RoleService 导入、`_persona_template` 未用 skills_text 参数、cc-role.ps1 未用 $skillsDir、session_panel 未用 session store 导入、以及 11 处未使用导入（AST 扫描 + 人工确认）；theme.trunc 保留（重导出给各 view）
+- 审查方法：AST 扫描未使用导入（`import ast` 遍历 ImportFrom/Import + Name 使用集）；pyflakes 不可用
+
+## 「新建」下拉按钮箭头
+- **QSS `QPushButton::menu-indicator` 的 chevron 太丑**（小、歪、SVG 渲染怪）——移除 QSS 指示器，改用**按钮文字里的 `▾` 字形**（U+25BE，继承按钮白色，随 Segoe UI 清晰渲染）：`PressButton(' 新建  ▾')`
+- **⚠️ `setMenu` 会强制显示 Qt 默认菜单指示器（又一个下箭头）**——出现双箭头。**不要用 setMenu**：改 `clicked.connect(_show_new_menu)` 手动弹菜单（`menu.exec(mapToGlobal(QPoint(0, btn.height())))`），默认指示器自然消失，只剩 ▾
+- 注意：GBK 控制台 print 含 ▾ 的字符串会 UnicodeEncodeError——验证用 `'▾' in text` 而非直接打印
+
+## 发布安装包（已构建）
+- **产物**：`dist/ClaudeCodeManager-setup.exe`（52MB，PyInstaller 单文件自解压安装器）；`dist/cc-ui/cc-ui.exe`（便携版 app）
+- **打包流程**：PyInstaller 打 app exe（`--windowed --icon=icon.ico --add-data "ccui/app/assets;ccui/app/assets"`）→ `scripts/assemble_installer.py` 组装 package（便携 app + 启动器 cc.cmd/cc-role.ps1/roles/skills/settings.json）→ `zip_installer.py` 压成 installer-data.zip（46.5MB）→ `installer_main.py`（解压 + 跑 setup.ps1）PyInstaller `--onefile --add-data "installer-data.zip;."`
+- **setup.ps1**：装到 `%LOCALAPPDATA%\ClaudeCodeManager`；生成 settings.json（SessionStart hook 指向安装目录的 track-session.ps1）+ cc-config.json 模板（无密钥）；设 `CLAUDE_CONFIG_DIR`(User) + 安装目录入 PATH；桌面快捷方式（章鱼图标 `IconLocation=<exe>,0`）；**检查 claude，缺则 `npm install -g @anthropic-ai/claude-code`**（node 缺失则提示）
+- **可移植化**：cc.cmd 的 `D:\ClaudeCode` 硬编码全改 `%~dp0`（cmd 必须 CRLF 行尾否则语法错）；cc-config-read/cc-provider 用 `$env:CLAUDE_CONFIG_DIR` 兜底；`config.py` 冻结时默认 CONFIG_DIR = exe 目录
+- **⚠️ PowerShell 5.1 读无 BOM 的 UTF-8 .ps1 会按 GBK 解析导致中文乱码/语法错**——脚本必须存 UTF-8 BOM（`utf-8-sig`）
+- **⚠️ 实测再踩（cc-config-read.ps1）**：无 BOM + 行尾中文注释 → PS5.1 按 GBK 解析注释乱码，**吞掉紧跟的下一行**（`Write-Output "ANTHROPIC_MODEL|$mainModel"` 整行消失）→ 模型环境变量没设 → 实际用了 provider 端默认模型（deepseek-v4-pro 而非配置的 v4-flash）。**根因：Edit/Write 工具默认写无 BOM UTF-8**，编辑含中文的 .ps1 会悄悄丢 BOM。排查：`head -c 3 x.ps1 | od -An -tx1` 看前 3 字节是否 `efbbbf`；修复：二进制方式在前面补 `\xef\xbb\xbf`（别用文本重写，会再丢 BOM）
+- **坑**：Inno Setup 静默安装在本环境失败（GUI 安装器被 UAC/headless 拦）、IExpress 挂起——最终用 PyInstaller 自解压方案；测试安装器必须把 `LOCALAPPDATA` 指向临时目录并清理副作用（快捷方式/环境变量）
+- **任意 Windows 可安装**：setup.ps1 的 claude 安装分三级——已装 claude → 直接配置；无 claude 有 node → `npm install -g @anthropic-ai/claude-code`；**无 claude 无 node → 自动下载便携版 Node**（nodejs.org/dist/v20.11.1/node-*-win-x64.zip，解压免管理员 + 加 PATH）再 npm 装 claude。便携 Node 已实测（下载 29MB → 解压 → node --version 正常）
+- **已知限制**（诚实告知）：仅 64 位 Windows 10/11（exe 是 64 位）；自动安装需联网（下载 Node/npm）；未签名 exe 会触发 SmartScreen（点"仍要运行"）；PATH 改动需新开终端
+- **图形安装向导（wizard.ps1）**：WinForms 表单——可选安装目录（默认 %LOCALAPPDATA%\ClaudeCodeManager，可改到非系统盘）、可选 cc-config.json（用户已有 provider 配置，给了就装成 Dest\cc-config.json）、检测已有安装（提示覆盖升级或先卸载）、「卸载旧版」按钮（删快捷方式/环境变量/目录）。`setup.ps1` 加 `-Dest/-ConfigPath` 参数；installer_main.py 跑 wizard.ps1
+- **合并升级（覆盖不删数据）**：setup.ps1 **不再 `Remove-Item` 整个目录**——只覆盖应用/启动器脚本，`roles`/`skills` 合并（保留用户自定义），cc-config.json/projects/sessions 等用户数据保留；升级时用户填的密钥不会丢
+- **认证变量按 claude 版本二选一**（⚠️ 曾同时设 `ANTHROPIC_AUTH_TOKEN`+`ANTHROPIC_API_KEY` 触发新版 "auth conflict" 警告且行为不可预期）：`cc-config-read.ps1` 跑 `claude --version`，**0.x 老版→只设 API_KEY；≥1.0 新版→只设 AUTH_TOKEN**（自定义 base URL 的 Bearer）；claude 不在 PATH 默认新版。老 claude 不认 AUTH_TOKEN 会回退 api.anthropic.com 报 ERR_BAD_REQUEST；目标机 cc-config.json 是空模板（安装器不打包密钥），用户必须填真实 apiKey
+
+## 卸载程序与数据保留（uninstall.cmd/ps1）
+- 卸载程序随 package 落到安装目录根：`uninstall.cmd`（双击，.ps1 双击只会记事本）→ `uninstall.ps1` 图形询问（是=保留数据、否=完全卸载、取消）
+- **保留数据**：用户数据（cc-config.json/projects/sessions/roles/skills/ui-state/session-providers/history 等）复制到 `%LOCALAPPDATA%\ClaudeCodeManager-data`（全局，与安装位置无关）→ 删安装目录 + 清快捷方式/CLAUDE_CONFIG_DIR/PATH；**下次安装 setup.ps1 自动检测该目录并合并恢复**（数据优先覆盖包内）→ 删除备份。完全卸载模式额外询问是否删历史备份
+- **⚠️ Copy-Item -Recurse 目录嵌套坑**：`Copy-Item srcDir destDir -Recurse` 当 destDir **已存在**时把 srcDir 整个嵌成 `destDir\<srcDir名>\`（roles→`dest\roles\roles\`）。目录合并必须逐子项复制（`New-Item destDir; Get-ChildItem srcDir | ForEach Copy-Item -Recurse`）；备份侧先删旧目标再复制
+- **打包流更新**：uninstall.cmd/ps1 由 assemble_installer.py 复制进 package 根（不是 zip 单独加），setup.ps1 复制 package 时落位；改脚本后必须重跑 assemble→zip→PyInstaller setup.spec
+- Find-Installs/Remove-Install：判定=有 cc-ui.exe 或 (cc.cmd+cc-role.ps1)；扫所有盘符根 ClaudeCodeManager/ClaudeCode；自动卸载**默认不勾选** + 删除前二次确认并标注含 .git 目录（防误删 D:\ClaudeCode 这类开发目录）
+- **测试副作用清理**：跑 setup.ps1 会真实设置 User 环境变量（CLAUDE_CONFIG_DIR/PATH）+ 桌面快捷方式，测试后必须 `SetEnvironmentVariable(...,$null,'User')` 恢复 + 删快捷方式；给 python 传路径要用 cygpath -w（MSYS /tmp 路径 Windows python 不认，解压会去错地方）
+
+## 会话模型列（<synthetic> 过滤 + 最后模型）
+- `store._parse_transcript` 曾 `models.add(msg['model'])` 累积所有 assistant 模型 → 模型列显示 `<synthetic> deepseek-v4-pro` 等脏值（claude 会写 `<synthetic>` 伪模型；同会话 /model 中途切换会累积多个历史模型）
+- 修复：过滤 `startswith('<')` 伪模型，只保留**最后**一条真实模型（模型列 = 会话当前/最终用的模型，切换后显示最新的）；`models` 仍是 list（provider 推断 `set(models)` 兼容单元素）；改解析逻辑后 `_SUMMARY_CACHE` 需清空才见新值
+
+## 安装向导二次优化（GUI + 检测）
+- **纯图形**：安装器 exe 用 `--windowed`（Windows GUI 子系统，无控制台黑窗）；wizard.ps1 用 WinForms（Segoe UI、标题+副标题、字段全宽、浏览按钮右对齐、按钮右下角标准布局）
+- **安装检测修正**：`Test-ExistingInstall` 判定「有 cc-ui.exe」**或**「有 cc.cmd + cc-role.ps1」（启动器式安装也算）——否则识别不出 D:\ClaudeCode 这类用启动器的旧安装；**智能默认路径**：先扫 `%LOCALAPPDATA%\ClaudeCodeManager` 和 `D:\ClaudeCode`，找到已安装的作为默认，并在状态区提示「检测到已有安装（覆盖升级/先卸载）」
+- **⚠️ PowerShell `New-Object Type($a * 2, 40)` 会把含 `*` 的表达式误解析（op_Multiply 数组错误）**——所有算术先预计算成变量再传构造器
+- **向导参数**：`setup.ps1 -Dest <路径> -ConfigPath <cc-config.json>`；向导表单里用户可选安装目录 + 可选配置文件（给了就装成 Dest\cc-config.json）；出错弹 MessageBox + 写 `~/ccm-install-error.log`

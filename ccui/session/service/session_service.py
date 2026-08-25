@@ -162,6 +162,17 @@ class SessionService:
             f.write('\n'.join(out))
         return p
 
+    def export_sessions(self, ids, out_path):
+        """导出选中会话到 zip。"""
+        return store.export_sessions_to_zip(ids, out_path)
+
+    def import_session(self, zip_path, overwrite=False):
+        """从 zip 导入会话，成功后广播 sessions.changed。"""
+        res = store.import_session_from_zip(zip_path, overwrite=overwrite)
+        if res.get('ok') and res.get('imported'):
+            SignalHub.instance().emit('sessions.changed')
+        return res
+
     def resume(self, sid, mode, provider):
         """以指定模式+provider 恢复会话，并记录会话→provider 映射。"""
         provider_data.record_session_provider(sid, provider)

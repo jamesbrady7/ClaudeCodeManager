@@ -171,6 +171,11 @@ def prewarm(splash=None):
     sm.live_ids()   # 预热进程存活检测
     status('加载角色…')
     RoleManager.instance().roles()  # 预热角色（含 uuid 回填）
+    status('加载技能…')
+    from ccui.skill.data.manager import SkillManager
+    SkillManager.instance().skills()          # 触发技能 uuid 自动回填
+    from ccui.skill.migrate import run as _migrate
+    _migrate()                                # 幂等：角色 meta 名→uuid 自愈
     status('预热界面组件…')
     _prewarm_dialogs()
     if splash:

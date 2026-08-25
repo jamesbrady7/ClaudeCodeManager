@@ -293,6 +293,20 @@ QToolTip {
 """
 
 
+# 技能树分组箭头（独立可点；收起=指向右、展开=指向下）。QSS url 需正斜杠。
+_chevron_dir = os.path.join(ASSETS_DIR, 'icons').replace(os.sep, '/')
+_branch_qss = (
+    'QTreeWidget#skillGroupTree::branch:has-children:!has-siblings:closed,\n'
+    'QTreeWidget#skillGroupTree::branch:closed:has-children {\n'
+    f'    image: url("{_chevron_dir}/chevron-right-color.svg");\n'
+    '}\n'
+    'QTreeWidget#skillGroupTree::branch:open:has-children {\n'
+    f'    image: url("{_chevron_dir}/chevron-down-color.svg");\n'
+    '}\n'
+)
+DARK_QSS += _branch_qss
+
+
 def fmt_size(n):
     if n < 1024:
         return f'{n} B'

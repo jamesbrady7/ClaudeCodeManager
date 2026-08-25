@@ -6,7 +6,7 @@
 import os
 import zlib
 
-from PySide6.QtCore import Qt, QRectF, QRect, QByteArray
+from PySide6.QtCore import Qt, QRectF, QByteArray
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QBrush
 from PySide6.QtWidgets import QApplication
 
@@ -41,11 +41,18 @@ def _badge_pixmap(initials, color, size):
     return pm
 
 
+_UI_ICON_CACHE = {}  # (name, size, color) → QIcon（树重建/工具栏热路径，渲染一次复用）
+
+
 def ui_icon(name, size=16, color='#c8c8cc'):
     """Lucide 图标：读 assets/icons/<name>.svg，把 currentColor 换成指定色，HiDPI 渲染 QIcon。
 
-    color 传十六进制如 '#f5f5f7'；danger 用 '#ff6961' 等。渲染一次，静态色。
+    color 传十六进制如 '#f5f5f7'；danger 用 '#ff6961' 等。按 (name,size,color) 缓存避免重复渲染。
     """
+    key = (name, size, color)
+    cached = _UI_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     path = os.path.join(ASSETS_DIR, 'icons', f'{name}.svg')
     if not os.path.exists(path):
         return QIcon()
@@ -67,7 +74,9 @@ def ui_icon(name, size=16, color='#c8c8cc'):
         # 传 px（物理）会让图标放大并右/下溢出被裁剪（高 DPI 下右缘被挡住）
         renderer.render(p, QRectF(0, 0, size, size))
         p.end()
-        return QIcon(pm)
+        icon = QIcon(pm)
+        _UI_ICON_CACHE[key] = icon
+        return icon
     except Exception:
         return QIcon()
 

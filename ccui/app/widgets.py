@@ -199,18 +199,19 @@ class AccentBarDelegate(QStyledItemDelegate):
 
 
 class SkillGroupList(QTreeWidget):
-    """按类型分组的技能勾选列表（分类头 + 技能行）。
+    """按类型分组的技能勾选列表（分类头 + 技能行），以 **uuid** 为标识。
 
     - 分类头：粗体弱色、浅色底条，显示「类型 · 已选/总数」；点击整行 = 全选/全不选。
     - 技能行：勾选框 + 名称（— 描述）。
       · row_select_toggles=True（新建角色）：点行任意位置切换勾选（_changed_at 防双重切换）。
       · row_select_toggles=False（技能管理）：点勾选框才切换，点行仅选中（供编辑），
         双击行发 doubleClickedSkill 信号（宿主直接打开编辑）。
+    - 勾选/选中/双击都按 uuid 传递（角色 meta 以 uuid 引用技能）。
     """
 
     doubleClickedSkill = Signal(str)
 
-    def __init__(self, skills, checked_names=(), category_order=(),
+    def __init__(self, skills, checked_ids=(), category_order=(),
                  row_select_toggles=True, parent=None):
         super().__init__(parent)
         self.setObjectName('skillGroupTree')
@@ -221,43 +222,43 @@ class SkillGroupList(QTreeWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._changed_at = 0
-        self._current_name = ''
+        self._current_uuid = ''
         self._row_select_toggles = row_select_toggles
         self.itemChanged.connect(self._on_changed)
         self.itemClicked.connect(self._on_clicked)
         self.itemDoubleClicked.connect(self._on_double_clicked)
-        self._build(skills, checked_names, category_order)
+        self._build(skills, checked_ids, category_order)
         self.expandAll()
         self._changed_at = 0  # 构建期 setCheckState 会触发 itemChanged，须清零
 
     # ---- 构建 ----
 
-    def rebuild(self, skills, checked_names=(), category_order=()):
+    def rebuild(self, skills, checked_ids=(), category_order=()):
         """整体重建（新建/编辑技能后刷新分组与勾选态）。"""
         self.clear()
-        self._current_name = ''
-        self._build(skills, checked_names, category_order)
+        self._current_uuid = ''
+        self._build(skills, checked_ids, category_order)
         self.expandAll()
         self._changed_at = 0
 
-    def find_item(self, name):
-        """按技能名找条目（跨分组）。"""
+    def find_item(self, skill_uuid):
+        """按技能 uuid 找条目（跨分组）。"""
         for i in range(self.topLevelItemCount()):
             header = self.topLevelItem(i)
             for j in range(header.childCount()):
                 c = header.child(j)
-                if c.data(0, Qt.ItemDataRole.UserRole) == name:
+                if c.data(0, Qt.ItemDataRole.UserRole) == skill_uuid:
                     return c
         return None
 
-    def _build(self, skills, checked_names, category_order):
+    def _build(self, skills, checked_ids, category_order):
         groups = {}
         for s in skills:
             cat = getattr(s, 'category', '') or '其他'
             groups.setdefault(cat, []).append(s)
         ordered = [c for c in category_order if c in groups]
         ordered += [c for c in groups if c not in ordered]
-        checked = set(checked_names or ())
+        checked = set(checked_ids or ())
         for cat in ordered:
             header = QTreeWidgetItem()
             header.setFlags(Qt.ItemFlag.ItemIsEnabled)  # 不可勾选/选中，点击=全选
@@ -274,14 +275,12 @@ class SkillGroupList(QTreeWidget):
                 label = s.name
                 if getattr(s, 'description', ''):
                     label += f'   —   {s.description}'
-                if getattr(s, 'source', '') == 'role':
-                    label += '   [角色专属]'
                 item = QTreeWidgetItem([label])
-                item.setData(0, Qt.ItemDataRole.UserRole, s.name)
+                item.setData(0, Qt.ItemDataRole.UserRole, getattr(s, 'uuid', ''))
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled
                               | Qt.ItemFlag.ItemIsSelectable
                               | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked if s.name in checked
+                item.setCheckState(0, Qt.CheckState.Checked if getattr(s, 'uuid', '') in checked
                                    else Qt.CheckState.Unchecked)
                 item.setForeground(0, QColor('#d4d4d8'))
                 item.setToolTip(0, label)
@@ -317,7 +316,7 @@ class SkillGroupList(QTreeWidget):
         if item.parent() is None:
             self._toggle_group(item)
             return
-        self._current_name = item.data(0, Qt.ItemDataRole.UserRole)
+        self._current_uuid = item.data(0, Qt.ItemDataRole.UserRole)
         if not self._row_select_toggles:
             return  # 技能管理：点行仅选中（供编辑），勾选只靠勾选框
         if time.time() - self._changed_at < 0.1:  # 勾选框默认已切换，避免双重切换
@@ -330,13 +329,13 @@ class SkillGroupList(QTreeWidget):
     def _on_double_clicked(self, item, column):
         if self._row_select_toggles or item.parent() is None:
             return
-        name = item.data(0, Qt.ItemDataRole.UserRole)
-        if name:
-            self.doubleClickedSkill.emit(name)
+        skill_uuid = item.data(0, Qt.ItemDataRole.UserRole)
+        if skill_uuid:
+            self.doubleClickedSkill.emit(skill_uuid)
 
     # ---- 查询 ----
 
-    def selected_skills(self):
+    def selected_uuids(self):
         out = []
         for i in range(self.topLevelItemCount()):
             header = self.topLevelItem(i)
@@ -346,8 +345,8 @@ class SkillGroupList(QTreeWidget):
                     out.append(c.data(0, Qt.ItemDataRole.UserRole))
         return out
 
-    def current_skill_name(self):
-        return self._current_name
+    def current_skill_uuid(self):
+        return self._current_uuid
 
 
 class PressButton(QPushButton):

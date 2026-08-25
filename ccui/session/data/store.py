@@ -8,6 +8,7 @@ import json
 import time
 import shutil
 import fnmatch
+import zipfile
 import datetime
 from dataclasses import replace
 
@@ -15,7 +16,8 @@ import psutil
 
 from ccui.infra.config import CONFIG_DIR, PROJECTS, SESSIONS_DIR, HISTORY, CLAUDE_JSON, log
 from ccui.infra.utils import munge, norm_path, best_effort_decode, iso_to_ms, ms_to_iso, text_content
-from ccui.session.data.models import Session, SpawnedSession
+from ccui.infra.archive import make_zip, zip_read_manifest
+from ccui.session.data.models import Session
 from ccui.session.data.provider import record_session_provider
 
 ID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
@@ -252,7 +254,7 @@ def _parse_transcript(path):
     cwd = ''
     user_count = 0
     assistant_count = 0
-    models = set()
+    last_model = ''  # 会话最后使用的真实模型（模型列/推断用它）
     now_ms = int(time.time() * 1000)
     future_slack_ms = 3600 * 1000  # 允许 1 小时时钟偏差，忽略异常未来时间戳
     for line in re.split(r'\r?\n', raw):
@@ -281,10 +283,15 @@ def _parse_transcript(path):
         elif o.get('type') == 'assistant':
             assistant_count += 1
             msg = o.get('message') or {}
-            if msg.get('model'):
-                models.add(msg['model'])
+            m = msg.get('model') or ''
+            # 过滤伪模型标记（<synthetic> 等内部占位，claude 会写进 assistant 消息），
+            # 只保留「最后」一条真实模型——模型列显示会话当前/最终用的模型，
+            # 而非所有历史模型的合并（否则同会话中途 /model 会显示一堆 + <synthetic>）
+            if m and not m.startswith('<'):
+                last_model = m
     data = {'title': title, 'first': first_time, 'last': last_time, 'cwd': cwd,
-            'user': user_count, 'assistant': assistant_count, 'models': sorted(models)}
+            'user': user_count, 'assistant': assistant_count,
+            'models': [last_model] if last_model else []}
     if key is not None:
         if len(_SUMMARY_CACHE) >= 500:
             _SUMMARY_CACHE.clear()
@@ -491,3 +498,135 @@ def detect_permission_mode(sid):
     except Exception:
         pass
     return 'danger' if last_pm == 'bypassPermissions' else 'normal'
+
+
+# ------------------------------------------------------------
+# 导入 / 导出（zip）
+# ------------------------------------------------------------
+
+def gather_session_artifacts(sid):
+    """收集一个会话的全部磁盘文件：transcript + 同名子目录 + file-history + tasks + telemetry。"""
+    found = locate_session(sid)
+    if not found:
+        return None
+    f = found[0]
+    transcript = f['path']
+    subdir = f['path'][:-6]  # projects/<projDir>/<sid>/
+    fh = os.path.join(CONFIG_DIR, 'file-history', sid)
+    tk = os.path.join(CONFIG_DIR, 'tasks', sid)
+    telemetry = glob_in_dir(os.path.join(CONFIG_DIR, 'telemetry'), f'1p_failed_events.{sid}.*.json')
+    revmap = build_reverse_map()
+    return {
+        'sid': sid,
+        'projDir': f['projDir'],
+        'projectPath': revmap.get(f['projDir']) or '',
+        'transcript': transcript,
+        'subdir': subdir if os.path.isdir(subdir) else '',
+        'fileHistory': fh if os.path.isdir(fh) else '',
+        'tasks': tk if os.path.isdir(tk) else '',
+        'telemetry': telemetry,
+    }
+
+
+def export_sessions_to_zip(ids, out_path):
+    """导出多个会话到 zip（manifest + 每个 <sid>/ 前缀的独立文件组）。"""
+    entries = []
+    exported, skipped = [], []
+    for sid in ids:
+        art = gather_session_artifacts(sid)
+        if not art:
+            skipped.append(sid)
+            continue
+        entries.append((f'{sid}/{sid}.jsonl', art['transcript']))
+        if art['subdir']:
+            entries.append((f'{sid}/files', art['subdir']))
+        if art['fileHistory']:
+            entries.append((f'{sid}/file-history', art['fileHistory']))
+        if art['tasks']:
+            entries.append((f'{sid}/tasks', art['tasks']))
+        for t in art['telemetry']:
+            entries.append((f'{sid}/telemetry/{os.path.basename(t)}', t))
+        exported.append({'sessionUuid': sid, 'projectPath': art['projectPath'],
+                         'projectDir': art['projDir']})
+    manifest = {'kind': 'cc.sessions', 'version': 1, 'sessions': exported}
+    make_zip(out_path, entries + [('manifest.json', None, json.dumps(manifest, ensure_ascii=False))])
+    return {'ok': True, 'exported': [s['sessionUuid'] for s in exported], 'skipped': skipped}
+
+
+def ensure_project_in_claude_json(real_path, sid):
+    """确保 .claude.json 里有该项目条目，并把 lastSessionId 设为 sid（保留 eol 风格）。"""
+    try:
+        with open(CLAUDE_JSON, 'rb') as f:
+            raw = f.read()
+        raw_text = raw.decode('utf-8-sig', errors='replace')
+        cfg = json.loads(raw_text)
+        projects = cfg.setdefault('projects', {})
+        if real_path not in projects:
+            projects[real_path] = {}
+        projects[real_path]['lastSessionId'] = sid
+        eol = '\r\n' if '\r\n' in raw_text else '\n'
+        with open(CLAUDE_JSON, 'wb') as f:
+            f.write((json.dumps(cfg, ensure_ascii=False, indent=2) + eol).encode('utf-8'))
+    except Exception as e:
+        log(f'更新 .claude.json 失败: {e}')
+
+
+def import_session_from_zip(zip_path, overwrite=False):
+    """从 zip 导入会话（按 manifest 的 sessions 逐会话落盘）。运行中会话拒绝覆盖。"""
+    manifest = zip_read_manifest(zip_path)
+    if manifest.get('kind') != 'cc.sessions':
+        return {'ok': False, 'error': 'not-sessions-zip'}
+    live = set(live_session_map())
+    imported, conflicts = [], []
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        names = zf.namelist()
+        for s in manifest['sessions']:
+            sid = s['sessionUuid']
+            if not ID_RE.match(str(sid)):
+                continue
+            proj_path = s.get('projectPath') or ''
+            proj_dir = s.get('projectDir') or munge(proj_path)
+            dest_dir = os.path.join(PROJECTS, proj_dir)
+            dest_transcript = os.path.join(dest_dir, sid + '.jsonl')
+            if sid in live:
+                conflicts.append(sid)
+                continue
+            if os.path.exists(dest_transcript) and not overwrite:
+                conflicts.append(sid)
+                continue
+            prefix = f'{sid}/'
+            member_map = {}
+            unsafe = False
+            for n in names:
+                if not n.startswith(prefix):
+                    continue
+                if n.startswith('/') or '..' in n.split('/'):
+                    unsafe = True
+                    break
+                rel = n[len(prefix):]
+                top = rel.split('/')[0]
+                if top == sid + '.jsonl':
+                    member_map[n] = dest_transcript
+                elif top == 'files':
+                    member_map[n] = os.path.join(dest_dir, rel)
+                elif top == 'file-history':
+                    member_map[n] = os.path.join(CONFIG_DIR, 'file-history', rel)
+                elif top == 'tasks':
+                    member_map[n] = os.path.join(CONFIG_DIR, 'tasks', rel)
+                elif top == 'telemetry':
+                    member_map[n] = os.path.join(CONFIG_DIR, 'telemetry', os.path.basename(rel))
+                # 其余未知成员忽略
+            if unsafe:
+                return {'ok': False, 'error': f'session {sid} 含不安全成员'}
+            os.makedirs(dest_dir, exist_ok=True)
+            for n, dest in member_map.items():
+                if n.endswith('/'):
+                    os.makedirs(dest, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with zf.open(n) as src, open(dest, 'wb') as dst:
+                    dst.write(src.read())
+            if proj_path:
+                ensure_project_in_claude_json(proj_path, sid)
+            imported.append(sid)
+    return {'ok': True, 'imported': imported, 'conflicts': conflicts}

@@ -2,7 +2,7 @@
 
 含全局快捷键（对 Claude Code 这类键盘重度用户是刚需）与 tab 内容淡切。
 """
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QApplication,
@@ -15,6 +15,7 @@ from ccui.app.icons import ui_icon
 from ccui.infra.config import load_ui_state, save_ui_state
 from ccui.session.view.session_panel import SessionPanel
 from ccui.role.view.role_panel import RolePanel
+from ccui.skill.view.skill_panel import SkillPanel
 
 
 class MainWindow(QMainWindow):
@@ -35,6 +36,11 @@ class MainWindow(QMainWindow):
         self.role_panel.status_message.connect(
             lambda text, ms: self.statusBar().showMessage(text, ms))
         self.tabs.addTab(self.role_panel, ui_icon('users', 14, '#9a9aa0'), '角色')
+        # 技能模块面板（技能库：浏览/新建/编辑/删除 + 被引用计数）
+        self.skill_panel = SkillPanel()
+        self.skill_panel.status_message.connect(
+            lambda text, ms: self.statusBar().showMessage(text, ms))
+        self.tabs.addTab(self.skill_panel, ui_icon('wrench', 14, '#9a9aa0'), '技能')
         self.setCentralWidget(self.tabs)
         # 快捷键 + tab 淡切：在 tab 全部加入后再接线，避免首次设置即触发
         self._setup_shortcuts()

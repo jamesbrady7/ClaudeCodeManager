@@ -7,7 +7,7 @@ class Role:
     """一个角色：人设 + 知识库 + 技能；持有该角色追踪的会话 uuid 列表。"""
     name: str
     description: str
-    skills: list = field(default_factory=list)
+    skills: list = field(default_factory=list)  # 技能 **uuid** 数组（meta.json，按 uuid 引用全局技能库）
     created: str = ''
     uuid: str = ''                     # 稳定标识（旧角色由 RoleManager 回填）
     session_ids: list = field(default_factory=list)  # 该角色的会话 uuid 列表

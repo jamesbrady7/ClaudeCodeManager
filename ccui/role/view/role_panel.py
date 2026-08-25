@@ -10,20 +10,21 @@ import traceback
 from PySide6.QtCore import Qt, QSize, QTimer, QFileSystemWatcher, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
-    QTreeWidget, QTreeWidgetItem, QPushButton, QLabel, QDialog, QMenu,
-    QAbstractItemView, QHeaderView, QMessageBox, QApplication,
+    QTreeWidget, QTreeWidgetItem, QPushButton, QLabel, QDialog,
+    QAbstractItemView, QHeaderView, QMessageBox, QApplication, QFileDialog,
 )
 
-from ccui.infra.config import ROLES_DIR, SKILLS_DIR, PROJECTS, SESSIONS_DIR, log
+from ccui.infra.config import ROLES_DIR, SKILLS_DIR, PROJECTS, SESSIONS_DIR, READONLY, log
 from ccui.infra.signalhub import SignalHub
 from ccui.infra.utils import iso_to_ms
 from ccui.app.theme import fmt_relative, trunc, apply_shadow
 from ccui.app.widgets import ElidedLabel, FadeMenu, EmptyHint, AccentBarDelegate, PressButton
-from ccui.app.icons import role_icon, role_avatar, role_icon_full, provider_icon, ui_icon
+from ccui.app.icons import role_avatar, role_icon_full, provider_icon, ui_icon
 from ccui.session.data.manager import SessionManager
 from ccui.session.data.models import Session, SpawnedSession
 from ccui.role.data.manager import RoleManager
 from ccui.role.service.role_service import RoleService
+from ccui.skill.service.skill_service import SkillService
 from ccui.session.service.session_service import SessionService
 from ccui.session.view.dialogs import ResumeDialog, DeleteDialog, InheritDialog
 from ccui.role.view.dialogs import (
@@ -45,6 +46,7 @@ class RolePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.service = RoleService()
+        self.skill_service = SkillService()
         self.session_service = SessionService()
         self.session_manager = SessionManager.instance()
         self.role_manager = RoleManager.instance()
@@ -70,6 +72,12 @@ class RolePanel(QWidget):
         self.btn_new_role.setIcon(ui_icon('plus', 14, '#ffffff'))
         self.btn_new_role.clicked.connect(self._new_role)
         left_lay.addWidget(self.btn_new_role)
+        self.btn_import_role = QPushButton(' 导入角色')
+        self.btn_import_role.setIcon(ui_icon('upload', 14, '#c8c8cc'))
+        self.btn_import_role.setToolTip('从 zip 导入角色')
+        self.btn_import_role.clicked.connect(self._import_role)
+        self.btn_import_role.setEnabled(not READONLY)
+        left_lay.addWidget(self.btn_import_role)
         self.role_list = QListWidget()
         self.role_list.setObjectName('roleList')
         self.role_list.setMinimumWidth(180)
@@ -201,6 +209,7 @@ class RolePanel(QWidget):
         hub.subscribe('sessions.changed', self._schedule_reload)
         hub.subscribe('roles.changed', self._schedule_reload)
         hub.subscribe('role.sessions.changed', self._on_role_sessions_changed)
+        hub.subscribe('skills.changed', self._schedule_reload)
 
     def _on_role_sessions_changed(self, name=''):
         if name and self.current_role and name != self.current_role.name:
@@ -279,7 +288,11 @@ class RolePanel(QWidget):
         self.lbl_name.setText(role.name)
         self.lbl_role_icon.setPixmap(role_icon_full(role.name, role.icon, 48).pixmap(48, 48))
         self.lbl_desc.setText(role.description or '')
-        self.lbl_skills.setText('技能：' + ('、'.join(role.skills) if role.skills else '（无）'))
+        names, missing = self.skill_service.skill_names_for_uuids(role.skills)
+        text = '技能：' + ('、'.join(names) if names else '（无）')
+        if missing:
+            text += f'（另有 {len(missing)} 个未安装）'
+        self.lbl_skills.setText(text)
         self._load_role_sessions(role.name, force=True)
 
     # ---- 角色会话 ----
@@ -455,11 +468,11 @@ class RolePanel(QWidget):
 
     # ---- 动作 ----
     def _new_role(self):
-        skills = self.service.list_skills()
+        skills = self.skill_service.list_skills()
         dlg = NewRoleDialog(skills, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        name, desc, selected = dlg.name(), dlg.description(), dlg.selected_skills()
+        name, desc, selected = dlg.name(), dlg.description(), dlg.selected_uuids()
         if not name:
             self.status_message.emit('请输入角色名称', 3000)
             return
@@ -526,6 +539,7 @@ class RolePanel(QWidget):
         menu = FadeMenu(self)
         act_start = menu.addAction(ui_icon('plus', 15, '#d4d4d8'), '创建角色会话')
         act_edit = menu.addAction(ui_icon('settings', 15, '#d4d4d8'), '编辑角色信息')
+        act_export = menu.addAction(ui_icon('download', 15, '#d4d4d8'), '导出角色')
         menu.addSeparator()
         act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
         chosen = menu.exec(self.role_list.viewport().mapToGlobal(pos))
@@ -533,6 +547,8 @@ class RolePanel(QWidget):
             self._start()
         elif chosen == act_edit:
             self._edit_role()
+        elif chosen == act_export:
+            self._export_role(name)
         elif chosen == act_del:
             self._delete_role(name)
 
@@ -554,6 +570,53 @@ class RolePanel(QWidget):
                 self.role_list.setCurrentRow(0)
         else:
             self._clear_detail()
+
+    def _export_role(self, name):
+        if not name:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, '导出角色', f'{name}-role.zip',
+                                              'Zip 档案 (*.zip)')
+        if not path:
+            return
+        res = self.service.export_role(name, path)
+        if res.get('ok'):
+            self.status_message.emit(f'角色 {name} 已导出', 3000)
+        else:
+            QMessageBox.warning(self, '导出失败', res.get('error', ''))
+
+    def _import_role(self):
+        path, _ = QFileDialog.getOpenFileName(self, '导入角色', '', 'Zip 档案 (*.zip)')
+        if not path:
+            return
+        res = self.service.import_role(path, mode='skip')
+        if not res.get('ok') and res.get('conflict'):
+            box = QMessageBox(self)
+            box.setWindowTitle('角色已存在')
+            box.setText('导入的角色已存在，如何处理？')
+            b_over = box.addButton('覆盖', QMessageBox.ButtonRole.AcceptRole)
+            b_skip = box.addButton('跳过', QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() == b_skip:
+                return
+            res = self.service.import_role(path, mode='overwrite')
+        if not res.get('ok'):
+            QMessageBox.warning(self, '导入失败', res.get('error', '未知错误'))
+            return
+        self._load_roles()
+        self.status_message.emit(f'角色 {res.get("name")} 已导入', 3000)
+        # 摘要：缺失技能/会话（技能/会话各自独立导入，这里只提示）
+        missing_skills = [u for u in res.get('skillUuids', [])
+                          if not self.skill_service.get_skill_by_uuid(u)]
+        existing_sessions = set(self.session_manager.by_id())
+        missing_sessions = [u for u in res.get('sessionUuids', []) if u not in existing_sessions]
+        if missing_skills or missing_sessions:
+            lines = []
+            if missing_skills:
+                lines.append(f'· {len(missing_skills)} 个引用技能未安装（可到技能库导入对应技能）')
+            if missing_sessions:
+                lines.append(f'· {len(missing_sessions)} 个引用会话不存在（追踪记录将自动清理）')
+            QMessageBox.information(self, '导入完成',
+                                    f'角色 {res.get("name")} 已导入。\n' + '\n'.join(lines))
 
     def _edit_role(self):
         """编辑角色信息：名称 / 描述 / 图标。"""
@@ -590,10 +653,10 @@ class RolePanel(QWidget):
     def _manage_skills(self):
         if not self.current_role:
             return
-        all_skills = self.service.list_skills(self.current_role.name)
+        all_skills = self.skill_service.list_skills()
         dlg = SkillsDialog(self.current_role.name, all_skills, self.current_role.skills, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self.service.update_skills(self.current_role.name, dlg.selected_skills())
+        self.service.update_role_skills(self.current_role.name, dlg.selected_uuids())
         self.status_message.emit('技能已更新', 3000)
         self._load_roles()

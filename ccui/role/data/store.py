@@ -1,15 +1,19 @@
-"""角色与技能的数据访问（角色模块 data 层）。
+"""角色数据访问（角色模块 data 层）。
 
-无 Qt、无 service 依赖。角色文件在 roles/<name>/，技能文件在
-skills/<name>/SKILL.md（全局）与 roles/<name>/skills/<name>/SKILL.md（角色专属）。
+无 Qt、无 service 依赖。角色文件在 roles/<name>/（meta/persona/knowledge/icon/sessions.jsonl）。
+技能已独立到 ccui/skill 模块，角色以 uuid 数组引用。
 """
 import os
 import re
 import json
 import time
+import shutil
+import tempfile
+import zipfile
 import datetime
 
-from ccui.infra.config import CONFIG_DIR, ROLES_DIR, SKILLS_DIR, ASSETS_DIR, log
+from ccui.infra.config import ROLES_DIR, ASSETS_DIR, log
+from ccui.infra.archive import make_zip, zip_read_manifest, safe_extract_zip
 
 NAME_RE = re.compile(r'^[\w一-鿿-]+$')  # 拉丁/数字/下划线/连字符 + 中日韩（中文名可用）
 
@@ -186,137 +190,80 @@ def set_default_icon(name):
 
 
 # ------------------------------------------------------------
-# 技能（SKILL.md）访问
+# 导入 / 导出（zip）
 # ------------------------------------------------------------
 
-# 技能类型（用于技能选择窗体的分组）。规则顺序即优先级：先匹配者生效。
-SKILL_CATEGORY_LABELS = ['动效动画', '界面设计', '设计系统', '品牌视觉', '内容演示', '综合', '其他']
-
-_CATEGORY_RULES = (
-    ('动效动画', ('animat', 'motion', '动效', '动画', 'spring', 'gesture',
-                  'interrupt', 'rubber', 'bounce', 'swipe', 'drag', 'physics')),
-    ('设计系统', ('design system', 'design-system', 'design token', '设计系统', 'token',
-                  'component spec')),
-    ('品牌视觉', ('brand', '品牌', 'logo', '标识', 'identity', 'corporate identity')),
-    ('内容演示', ('slide', 'presentation', 'banner', 'social', '演示', '幻灯片', '海报', 'chart')),
-    ('界面设计', ('ui', 'interface', '界面', 'web', 'macos', 'apple', 'tailwind', 'shadcn',
-                  'css', 'component', 'accessible', 'frontend', 'desktop', 'responsive',
-                  'typography', 'color', '用户')),
-    ('综合', ('design', '设计')),
-)
-
-
-def infer_skill_category(name, description):
-    """从技能名+描述推断类型（frontmatter 无 category 时的兜底）。"""
-    text = f'{name} {description or ""}'.lower()
-    for label, kws in _CATEGORY_RULES:
-        if any(k in text for k in kws):
-            return label
-    return '其他'
-
-
-def _parse_frontmatter(content):
-    """解析 SKILL.md 的 frontmatter（--- name/description/category ---）。"""
-    name = ''
-    description = ''
-    category = ''
-    body = content
-    if content.startswith('---'):
-        parts = content.split('---', 2)
-        if len(parts) >= 3:
-            front = parts[1]
-            body = parts[2]
-            for line in front.splitlines():
-                if ':' in line:
-                    k, _, v = line.partition(':')
-                    k = k.strip().lower()
-                    v = v.strip()
-                    if k == 'name':
-                        name = v
-                    elif k == 'description':
-                        description = v
-                    elif k == 'category':
-                        category = v
-    return name, description, category, body.strip()
+def export_role_to_zip(name, out_path):
+    """导出角色为 zip。**白名单**：meta/persona/knowledge/icon/sessions.jsonl，
+    不含技能内容、不含会话 transcript、不含角色专属技能/inherit.md。"""
+    d = role_dir(name)
+    if not os.path.isdir(d):
+        return {'ok': False, 'error': 'not-found'}
+    meta = read_meta(name)
+    manifest = {
+        'kind': 'cc.role', 'version': 1,
+        'role': {'name': name,
+                 'uuid': meta.get('uuid', ''),
+                 'skillUuids': meta.get('skills', []),
+                 'sessionUuids': [t['session_id'] for t in role_sessions_from_file(name)
+                                  if t.get('session_id')]},
+    }
+    entries = [
+        (f'{name}/meta.json', os.path.join(d, 'meta.json')),
+        (f'{name}/persona.md', os.path.join(d, 'persona.md')),
+        (f'{name}/knowledge.md', os.path.join(d, 'knowledge.md')),
+    ]
+    sp = os.path.join(d, 'sessions.jsonl')
+    if os.path.isfile(sp):
+        entries.append((f'{name}/sessions.jsonl', sp))
+    icon = role_icon_path(name)
+    if icon:
+        entries.append((f'{name}/{os.path.basename(icon)}', icon))
+    make_zip(out_path, entries + [('manifest.json', None, json.dumps(manifest, ensure_ascii=False))])
+    return {'ok': True}
 
 
-def global_skill_dir(name):
-    return os.path.join(SKILLS_DIR, name, 'SKILL.md')
+def import_role_from_zip(zip_path, mode='skip', new_name=''):
+    """从 zip 导入角色（白名单文件）。mode: skip / overwrite / rename(new_name)。
 
-
-def role_skill_dir(role_name, name):
-    return os.path.join(ROLES_DIR, role_name, 'skills', name, 'SKILL.md')
-
-
-def list_global_skill_names():
+    返回 manifest 里的 skillUuids/sessionUuids 供 view 层做存在性检查
+    （技能/会话各自独立导入；缺失的优雅跳过，不由本模块判断）。
+    """
+    manifest = zip_read_manifest(zip_path)
+    if manifest.get('kind') != 'cc.role':
+        return {'ok': False, 'error': 'not-role-zip'}
+    info = manifest.get('role', {})
+    src_name = info.get('name', '')
+    if not src_name or not NAME_RE.match(src_name):
+        return {'ok': False, 'error': 'invalid-name'}
+    dest_name = (new_name or src_name).strip()
+    if not NAME_RE.match(dest_name):
+        return {'ok': False, 'error': 'invalid-name'}
+    dest_dir = os.path.join(ROLES_DIR, dest_name)
+    conflict = os.path.isdir(dest_dir)
+    if conflict and mode != 'overwrite':
+        return {'ok': False, 'error': 'exists', 'conflict': True}
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        members = [n for n in zf.namelist()
+                   if n == src_name + '/' or n.startswith(src_name + '/')]
+    # 先解包到临时目录，再移动到目标——**绝不覆盖/改名磁盘上已存在的原角色目录**
+    tmp = tempfile.mkdtemp(prefix='cc-role-import-')
     try:
-        return [d for d in os.listdir(SKILLS_DIR)
-                if os.path.exists(os.path.join(SKILLS_DIR, d, 'SKILL.md')) and NAME_RE.match(d)]
-    except Exception:
-        return []
-
-
-def list_role_skill_names(role_name):
-    d = os.path.join(ROLES_DIR, role_name, 'skills')
-    try:
-        return [x for x in os.listdir(d)
-                if os.path.exists(os.path.join(d, x, 'SKILL.md')) and NAME_RE.match(x)]
-    except Exception:
-        return []
-
-
-def read_skill(skill_name, role_name=None):
-    """读一个技能；role_name 给定时优先角色专属，否则全局。返回 Skill 或 None。"""
-    path = None
-    source = ''
-    if role_name:
-        p = role_skill_dir(role_name, skill_name)
-        if os.path.exists(p):
-            path, source = p, 'role'
-    if path is None:
-        p = global_skill_dir(skill_name)
-        if os.path.exists(p):
-            path, source = p, 'global'
-    if path is None:
-        return None
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        name, desc, cat, body = _parse_frontmatter(content)
-        name = name or skill_name
-        return {
-            'name': name,
-            'description': desc,
-            'category': cat or infer_skill_category(name, desc),
-            'content': content,
-            'body': body,
-            'path': path,
-            'source': source,
-        }
-    except Exception as e:
-        log(f'读技能失败: {e}')
-        return None
-
-
-def write_skill(skill_name, content, role_name=None):
-    """写技能内容（SKILL.md）。role_name 给定时写角色专属，否则写全局。"""
-    if role_name:
-        path = role_skill_dir(role_name, skill_name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-    else:
-        path = global_skill_dir(skill_name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(content)
-    except Exception as e:
-        log(f'写技能失败: {e}')
-
-
-def create_skill(skill_name, description, body, role_name=None, category=''):
-    """新建技能：用 frontmatter 包装内容（category 缺省时按关键字推断）。"""
-    cat = category or infer_skill_category(skill_name, description)
-    content = (f'---\nname: {skill_name}\n'
-               f'category: {cat}\n'
-               f'description: {description}\n---\n\n{body}').strip() + '\n'
-    write_skill(skill_name, content, role_name)
+        safe_extract_zip(zip_path, tmp, members=members)
+        src_dir = os.path.join(tmp, src_name)
+        if not os.path.isdir(src_dir):
+            return {'ok': False, 'error': 'zip 内缺少角色目录'}
+        if os.path.isdir(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)  # overwrite 才走到这
+        shutil.move(src_dir, dest_dir)  # 跨盘（临时目录可能在别的盘）用 move 而非 rename
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # 重命名导入：meta.name 更新
+    if dest_name != src_name:
+        meta = read_meta(dest_name)
+        meta['name'] = dest_name
+        write_meta(dest_name, meta)
+    return {'ok': True, 'name': dest_name,
+            'skillUuids': info.get('skillUuids', []),
+            'sessionUuids': info.get('sessionUuids', []),
+            'conflict': conflict}
