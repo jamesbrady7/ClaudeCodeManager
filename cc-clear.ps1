@@ -1,4 +1,4 @@
-# Claude Code session cleaner
+﻿# Claude Code session cleaner
 # Usage:
 #   cc clear               -> list sessions and show how to delete
 #   cc clear <sessionId>   -> delete one session (full id or unique prefix)

@@ -6,7 +6,7 @@ import datetime
 
 
 def _default_config_dir():
-    """PyInstaller 冻结时默认配置目录 = exe 所在目录（安装目录）；否则 D:\\ClaudeCode。"""
+    """PyInstaller 冻结时默认配置目录 = exe 所在目录（安装目录，含配套数据）；否则 D:\\ClaudeCode。"""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return r'D:\ClaudeCode'

@@ -1,4 +1,4 @@
-# Claude Code session history viewer
+﻿# Claude Code session history viewer
 # Lists past sessions stored under D:\ClaudeCode\projects in a human-readable form.
 
 $ErrorActionPreference = 'SilentlyContinue'

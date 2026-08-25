@@ -252,6 +252,7 @@
 
 ## 发布安装包（已构建）
 - **产物**：`dist/ClaudeCodeManager-setup.exe`（52MB，PyInstaller 单文件自解压安装器）；`dist/cc-ui/cc-ui.exe`（便携版 app）
+- **配置目录**（infra/config.py）：非冻结→D:\ClaudeCode；冻结→**exe 所在目录**（安装版，setup.ps1 保证目录里有 cc-config.json 模板 + 14 技能 + roles，exe 双击功能完整）。dist/cc-ui 是构建产物（只有 exe+_internal 无数据），**单独双击缺技能/角色是预期**，不是 bug——要完整功能用安装包装出来的 exe。曾尝试给便携 exe 加"回退 D:\ClaudeCode"被用户否决（不要硬编码本地目录），保持标准行为
 - **打包流程**：PyInstaller 打 app exe（`--windowed --icon=icon.ico --add-data "ccui/app/assets;ccui/app/assets"`）→ `scripts/assemble_installer.py` 组装 package（便携 app + 启动器 cc.cmd/cc-role.ps1/roles/skills/settings.json）→ `zip_installer.py` 压成 installer-data.zip（46.5MB）→ `installer_main.py`（解压 + 跑 setup.ps1）PyInstaller `--onefile --add-data "installer-data.zip;."`
 - **setup.ps1**：装到 `%LOCALAPPDATA%\ClaudeCodeManager`；生成 settings.json（SessionStart hook 指向安装目录的 track-session.ps1）+ cc-config.json 模板（无密钥）；设 `CLAUDE_CONFIG_DIR`(User) + 安装目录入 PATH；桌面快捷方式（章鱼图标 `IconLocation=<exe>,0`）；**检查 claude，缺则 `npm install -g @anthropic-ai/claude-code`**（node 缺失则提示）
 - **可移植化**：cc.cmd 的 `D:\ClaudeCode` 硬编码全改 `%~dp0`（cmd 必须 CRLF 行尾否则语法错）；cc-config-read/cc-provider 用 `$env:CLAUDE_CONFIG_DIR` 兜底；`config.py` 冻结时默认 CONFIG_DIR = exe 目录

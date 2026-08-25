@@ -1,323 +1,176 @@
 # 继承自 1 个会话
-生成时间: 2026-08-24T16:56:17.5472000Z
+生成时间: 2026-08-25T16:03:47.0776258Z
 
 
-## 会话 5ac6118a-c1b6-46b0-bb78-46f1169f76b7
-标题: 我现在继承了会话，你能告诉我之前是什么情况吗？
+## 会话 7ab49d1f-73c1-4ed9-9c85-36895f48885a
+标题: 现在是什么情况！
 目录: D:\ClaudeCode
-开始: 2026-08-23T08:09:04.011Z
+开始: 2026-08-24T16:56:22.329Z
 
-助手: 便携 Node 验证通过（v20.11.1 可运行）。更新知识库并给出诚实结论：
-助手: 现在可以确认了——**我补齐了关键缺口**，让它真正能在"任意一台 Windows 电脑"上安装。
+助手: 修复和恢复都验证通过。现在把这次的关键坑写回知识库（补充到已有的「时间戳坑」小节）：
+助手: 修好了。这是根因、修复和恢复的完整情况：
 
-## 现在的工作流程（三级保障）
+## 根因
 
-| 目标机器状态 | 安装器行为 |
-| --- | --- |
-| **已装 Claude Code** | 直接检测到 → 配置管理器，不重复装 |
-| **没装 Claude Code，但有 Node.js** | `npm install -g @anthropic-ai/claude-code` 自动装 |
-| **没装 Claude Code，也没 Node.js** | **先自动下载便携版 Node**（免管理员，已实测）→ 再 npm 装 Claude Code |
+一个时间戳解析 bug 导致**角色↔会话的关联记录被误删**。
 
-便携 Node 机制已验证：下载 29MB → 解压 → `node --version` 正常。
+角色会话启动时，hook（`track-session.ps1`）会把会话记录追加到 `roles/<角色>/sessions.jsonl`，时间戳用 `ToString('o')` 生成，是 **7 位小数**（如 `2026-08-24T16:56:22.1197281Z`）。
 
-## 为什么"任意机器"能装
-- **cc-ui.exe 自带** Python + PySide6 + VCRUNTIME → 目标机器不用预装任何东西
-- **免管理员**（装到 `%LOCALAPPDATA%` + 便携 Node）
-- `setup.cmd` 用 `-ExecutionPolicy Bypass` → 不受机器 PowerShell 策略限制
-- 已装/未装 Claude Code 都覆盖
+而 `ccui/role/data/manager.py` 的 `prune_stale()`（清理孤儿会话记录）里直接用裸 `datetime.fromisoformat` 解析这个时间戳。**Python 3.9 的 `fromisoformat` 只接受 ≤6 位小数**，7 位会抛 `ValueError` → 走进 `except` 分支 → `stale=True` → **绕过了 10 分钟年龄守卫**。
 
-## 但我要诚实告诉你 4 个限制
+于是只要会话刚启动、transcript 还没来得及生成（sid 不在 existing_ids 里），这条记录就被**立即删掉**。这正好解释了你的两个症状：
 
-1. **仅 64 位 Windows 10/11** —— exe 是 64 位编译的，32 位系统跑不了（现代 Windows 基本都是 64 位）
-2. **自动安装需要联网** —— 下载 Node/npm/Claude Code 那一步要有网
-3. **SmartScreen 提示** —— exe 未签名，目标机器首次运行会提示"未知发布者"，要点「更多信息 → 仍要运行」。做代码签名（证书）才…
-用户: 我装到一台有一个比较老的 claude code 的电脑上之后，运行终端的时候报错Unable to connect to Anthropic services
+- **角色面板丢会话**：`sessions.jsonl` 记录被删 → 角色查不到它的会话
+- **会话面板角色列丢**：`session_role_map()` 反查不到 → 角色列空白
 
- Failed to connect to api.anthropic.com: ERR_BAD_REQUEST
-助手: 这个报错很关键。分析一下——错误是 `api.anthropic.com`，说明目标机器上的**老版 claude 没有识别管理器设的 provider 环境变量**（`ANTHROPIC_AUTH_TOKEN` 是新版 claude 用的，老版用 `ANTHROPIC_API_KEY`），于是回退到默认 api.anthropic.com + 无密钥 → 连接失败。
+## 修复
 
-先看 cc-config-read.ps1 当前输出了哪些环境变量：
-助手: 这个报错定位清楚了：老版 claude 没认 `ANTHROPIC_AUTH_TOKEN`（新版变量），回退到 `api.anthropic.com` + 无有效密钥 → ERR_BAD_REQUEST。老版 claude 用的是 `ANTHROPIC_API_KEY`。
+`prune_stale` 改用 `iso_to_ms()`（内部会截断小数到 6 位再解析），年龄守卫恢复生效——刚启动 <10 分钟的记录会保留，只有真正超龄且 transcript 不存在的才清理。已验证：7 位小数时间戳现在正确保留，10 天前的孤儿正确删除。
 
-修复：cc-config-read 同时输出两个变量（新版 AUTH_TOKEN + 老版 API_KEY），兼容两代 claude：
-助手: 验证输出 + 重新打包（让修复进安装包）：
-助手: 修复完成并已进安装包。
+## 数据恢复
 
-## 报错原因
+从 transcript 里反查「【角色系统】你是 uidesigner」标记，恢复了 2 条丢失…
+用户: 第二个 BUG，我明明没有给 provider 配置 deepseek-v4-pro，但现在还是在用它！
+助手: `ANTHROPIC_MODEL` 这一行在输出里**缺失了**！让我精确验证：
+助手: 根因找到了。让我确认所有 `.ps1` 脚本的 BOM 状态（这是知识库里记过的坑）：
+助手: 根因确认：**只有 `cc-config-read.ps1` 丢了 BOM**（其他三个都有）。PowerShell 5.1 按 GBK 解析无 BOM 的 UTF-8，第 75 行的中文注释乱码，把下一行 `ANTHROPIC_MODEL` 输出吞掉了。
 
-`Failed to connect to api.anthropic.com` 说明 claude 走的是**默认的 api.anthropic.com**，而不是管理器配置的 provider（deepseek/glm）。两个原因叠加：
+修复——加回 BOM：
+助手: 修复生效了。看完整输出确认没有其他乱码问题：
+助手: 修复完成，10 行输出全部正确。现在把这个「再踩」的坑写回知识库（强化已有的 BOM 记录）：
+助手: 第二个 bug 也修好了。这是根因和修复：
 
-1. **老版 claude 不认 `ANTHROPIC_AUTH_TOKEN`**（新版变量）——老版读的是 `ANTHROPIC_API_KEY`。管理器只设了 AUTH_TOKEN → 老 claude 没拿到 provider 配置，回退到 api.anthropic.com
-2. **目标机器上 cc-config.json 是空模板**（安装器生成的无密钥模板）——即使走对 provider 也没密钥可认证
+## 根因
 
-## 我做的修复
+`cc-config-read.ps1` 这个脚本**丢了 UTF-8 BOM**。
 
-`cc-config-read.ps1` 现在**同时输出两个变量**，兼容两代 claude：
-```
-ANTHROPIC_BASE_URL  = https://api.deepseek.com/anthropic   （两代都认）
-ANTHROPIC_AUTH_TOKEN = sk-***   （新版 claude 用）
-ANTHROPIC_API_KEY    = sk-***   （老版 claude 用）← 新增
-```
-安装器已重新打包（`dist/ClaudeCodeManager-setup.exe`）。
+PowerShell 5.1 读无 BOM 的 UTF-8 脚本会按 GBK 解析。脚本第 75 行有一句中文注释：
 
-## 你需要在这台目标机器上做的
-
-1. **填 API 密钥**：编辑 `<安装目录>\cc-config.json`，把 deepseek/glm 的 `apiKey` 从空字符串改成真实密钥（安装器给的是空模板，必须填）
-2. **更新安装**：用新安装器重装（或手动把上面那行 `ANTHROPIC_API_KEY` 加进目标…
-用户: 但现在原本电脑上已经装了你的安装包了，直接新的包覆盖有没有问题
-助手: 好问题——这会暴露一个**升级覆盖的坑**。先看当前 setup.ps1 的安装逻辑：
-助手: 确认是坑：setup.ps1 第 21 行 `Remove-Item $dest -Recurse` 会**整个删掉安装目录**再重装——你填的 API 密钥、运行的会话数据、自定义角色全会没。
-
-修复为**合并升级**：覆盖应用和启动器，但保留密钥/会话数据/自定义角色：
-助手: 验证合并升级逻辑（模拟目标机已有的旧安装 + 自定义角色 + 填好的密钥 + 会话数据，跑新 setup 看是否保留）：
-助手: 合并升级验证通过（自定义角色/密钥/会话数据全保留 + 新启动器已装）。清理测试副作用 + 重新打包：
-助手: 可以了——但**修复之前是不行的**，这正是你该担心的点。
-
-## 原来的坑
-旧版 setup.ps1 重装时会 `Remove-Item $dest -Recurse` **整个删掉安装目录**再重装。直接覆盖会导致：
-- ❌ 你填的 **API 密钥**没了（回到空模板）
-- ❌ **会话数据**（projects/ 等 transcript）全没了
-- ❌ **自定义角色**没了（只留包内自带的 uidesigner）
-
-## 修复：合并升级
-setup.ps1 改为**只覆盖应用和启动器，保留用户数据**：
-
-| 内容 | 升级时 |
-| --- | --- |
-| cc-ui.exe / _internal / 启动器脚本 | ✅ 覆盖更新 |
-| `cc-config.json`（你的密钥） | ✅ **保留** |
-| `projects/` `sessions/` 等会话数据 | ✅ **保留** |
-| 自定义角色/技能 | ✅ **保留**（合并，只新增不删除） |
-
-## 验证（模拟目标机已有旧安装）
-| 项 | 结果 |
-|---|---|
-| 自定义角色 myrole | ✅ 保留 |
-| cc-config.json 里填的密钥 | ✅ 保留 |
-| 会话 transcript | ✅ 保留 |
-| 新启动器（含 API_KEY 修复） | ✅ 已覆盖装上 |
-
-## 结论
-
-**现在可以直接用新的 `dist/ClaudeCodeManager-setup.exe` 覆盖安装**——它检测到已有安装就走合并升级，只更新程序、保留你的密钥/数据/角色。装完就能用上修复（老 claude 也能识别 provider 配置了）。
-
-（我已经清理了测试留下的临时快捷方式和环境变量，你的开发环境不受影响。）
-用户: 目标电脑上哪儿来的 cc-config.json？
-助手: 好问题——`cc-config.json` **不是打包进安装器的**，是 setup.ps1 在**首次安装时生成的空模板**。
-
-## 来龙去脉
-
-1. **安装器不打包 cc-config.json**（我在 assemble 阶段特意排除了它）——因为它含 **API 密钥**，出于安全和隐私不会随安装包分发
-2. setup.ps1 第 3 步：如果目标机没有 cc-config.json，就生成一个**空模板**：
-```json
-{ "provider config": {
-    "default provider": "deepseek",
-    "deepseek": { "baseUrl": "...", "apiKey": "", ... },   // ← apiKey 是空的
-    "glm":      { "baseUrl": "...", "apiKey": "", ... }
-}}
-```
-3. **升级时保留**你填过密钥的版本（我上一轮修的合并升级）
-
-## 所以目标机器上的实际情况
-
-那台目标机上的 cc-config.json 是**空密钥模板**——这就是为什么即使修了老 claude 的环境变量，claude 还是连不上：**没有真实密钥，provider（deepseek/glm）也会拒绝认证**。
-
-## 你需要在那台目标机上做的
-
-**编辑 `<安装目录>\cc-config.json`，把 apiKey 填成真实密钥**。两个选择：
-
-**A. 用你自己的 provider 密钥**（推荐，和管理器设计一致）：
-- 把你自己 D:\ClaudeCode\cc-config.json 里 deepseek 或 glm 的 `apiKey` 复制过去（或整个文件复制到目标机的安装目录）
-- 这样 `cc` 命令会把 c…
-用户: 这个软件默认装在哪个目录的？
-助手: 默认装在 **`%LOCALAPPDATA%\ClaudeCodeManager`**。
-
-在你当前这台电脑上就是：
-```
-C:\Users\Zz\AppData\Local\ClaudeCodeManager
+```powershell
+Write-Output "ANTHROPIC_API_KEY|$($slot.apiKey)"  # 老版 claude 用 API_KEY，新版用 AUTH_TOKEN，两者都设兼容
 ```
 
-## 为什么选这个目录
-- **每用户安装、免管理员**（不需要 Program Files 的权限）
-- 这是 Windows 的标准用户应用数据目录（LocalAppData）
+这句中文注释在 GBK 误解析下乱码，把**紧跟的下一行整个吞掉了**——也就是：
 
-## 目录结构（安装后）
-```
-%LOCALAPPDATA%\ClaudeCodeManager\
-├── cc-ui.exe          # 应用主程序（章鱼图标）
-├── _internal\         # Python + PySide6 运行时
-├── cc.cmd             # `cc` 命令（已在用户 PATH）
-├── cc-role.ps1 / cc-config-read.ps1 / ...   # 启动器脚本
-├── roles\             # 角色（uidesigner + 你自定义的）
-├── skills\            # 技能库（14 个）
-├── settings.json      # SessionStart hook 注册
-├── cc-config.json     # provider 配置（你填密钥的那个）
-└── projects\ sessions\   # 会话数据（运行 claude 后生成）
+```powershell
+Write-Output "ANTHROPIC_MODEL|$mainModel"   ← 这一行消失了
 ```
 
-## 相关路径
-- **配置目录 = 安装目录**（`CLAUDE_CONFIG_DIR` 指向它，冻结的 app 默认用 exe 所在目录）
-- **桌面快捷方式** → `cc-ui.exe`
-- **`cc` 命令** → 安装目录已加入用户 PATH
+结果就是 `ANTHROPIC_MODEL` 环境变量**根本没被设置**。Claude Code 收不到你配置的 `deepseek-v4-flash`，就回退到了 deepseek 端的默认模型 `deepseek-v4-pro`。这正是你看到的「我没配 v4-pro，却在用 v4-pro」。
 
-这也意味着：…
-用户: 总是默认装在 C 盘吗，不太好吧，因为你会产生数据呀，要么应该自定义安装路径，要么应该定义一个专门存放数据的文件路径。然后如果之前装过的话，你检测到需要提示用户看是否需要将其卸载，然后你确实可以给一个安装引导，直接让用户选择一个文件路径，就是那个需要的cc-config配置文件路径，用户没给路径就不管，就让 API Key 为空，如果用户给定路径了，你就直接把用户给定的配置文件改名为  cc-config，并放到你需要的地方去
-助手: 这些都是合理的安装器 UX 改进。我做一个**图形安装向导**：可选安装路径 + 可选 cc-config 文件 + 旧版检测（可先卸载）。
+## 修复
 
-先给 setup.ps1 加参数（安装路径 + 用户提供的配置路径）：
-助手: 加"用户提供的配置 → 装为 cc-config.json"逻辑（在模板生成前）：
-助手: 写图形安装向导 wizard.ps1（选路径 + 选配置文件 + 旧版检测/卸载）：
-助手: 更新 installer_main.py 运行 wizard.ps1（图形向导）+ zip 包含向导：
-助手: 给 wizard.ps1 加 BOM（PowerShell 5.1 需要），语法检查两个脚本：
-助手: 两个脚本语法 OK。重新压缩 + 重建 + 测试新参数（自定义路径 + 提供配置）：
-助手: 自定义路径 + 提供配置都成功了。清理副作用 + 测试卸载函数逻辑：
-助手: 卸载函数正常（目录已删）。验证 zip 包含向导 + 最终确认：
-助手: 全部完成，安装器升级为**图形向导**。
-
-## 新增的安装向导（wizard.ps1）
-
-运行 `ClaudeCodeManager-setup.exe` 后弹出一个图形窗口：
-
-```
-Claude Code 管理器 · 安装
-┌──────────────────────────────────────────┐
-│ 安装目录（也是数据/配置存放处，建议选非系统盘）：  │
-│ [ C:\Users\...\AppData\Local\ClaudeCodeManager ] [浏览…] │
-│                                          │
-│ cc-config.json（可选：你的 provider 配置）： │
-│ [                                    ] [浏览…] │
-│                                          │
-│ ⚠ 检测到该目录已有安装。点「安装」=覆盖升级     │
-│   （保留数据/密钥）；全新安装先点「卸载旧版」     │
-│                                          │
-│ [安装] [卸载旧版] [取消]                    │
-└──────────────────────────────────────────┘
-```
-
-## 满足你的三个要求
-
-1. **自定义安装路径** —— 用户可把安装目录选到非系统盘（比如 `D:\ClaudeCodeManager`），数据也跟着放那（安装目录即数据/配置目录）
-2. **旧版检测 + 卸载** —— 检测到已有安装就提示，提供「卸载旧版」按钮（删快捷方式/环境变量/目录）
-3. **cc-config.json…
-用户: 你安装目录是应该要让用户选择的哦！这个你知道不！不是命令行，刚刚说的那些都是图形指引
-助手: 你说得对，安装目录应该是**图形选择**（FolderBrowserDialog），不是命令行。向导已经用了图形表单——但我确认一下你担心的是不是这个：安装器 exe 目前是**控制台程序**（会闪一个黑窗再弹 GUI），而且如果安装出错用户看不到提示。
-
-我把安装器改成**纯图形**（--windowed 无控制台黑窗）+ 向导内错误弹窗。先改 wizard.ps1 加错误处理：
-助手: 改 installer_main.py 为纯图形（无控制台交互，错误写日志），然后 --windowed 重建：
-助手: 纯图形重建完成。验证 exe 是无控制台的 GUI 子系统：
-助手: 确认：安装器现在是 **Windows GUI 子系统（无控制台黑窗）**。
-
-## 最终效果
-
-双击 `ClaudeCodeManager-setup.exe` → **直接弹出图形安装向导**（无黑窗闪动）：
-
-```
-┌─ Claude Code 管理器 · 安装 ─────────────────────┐
-│ 安装目录（也是数据/配置存放处）：                   │
-│ [ C:\...\ClaudeCodeManager        ] [浏览…]  ← 图形目录选择器 │
-│                                               │
-│ cc-config.json（可选：provider 配置）：          │
-│ [                               ] [浏览…]  ← 图形文件选择器 │
-│                                               │
-│ ⚠ 检测到该目录已有安装…（可覆盖升级或卸载旧版）      │
-│                                               │
-│ [安装] [卸载旧版] [取消]                        │
-└───────────────────────────────────────────────┘
-```
-
-- **安装目录** → 点「浏览…」弹出 Windows 标准**文件夹选择对话框**（用户图形选择，可挑 D: 盘）
-- **cc-config.json** → 点「浏览…」选择文件
-- 全程**纯图形**：选路径、选配置、点安装、完成/错误都是弹窗
-- 出错时弹错误框 + 写 `~/ccm-install-er…
-用户: 你这个安装界面也太丑了！排布完全混乱！而且我想知道你是怎么判断是否安装的，我这台电脑上不应该装过吗！为什么也没检测出来
-助手: 两个问题都收到：
-1. **界面丑/乱** —— 绝对定位没适配，重写成规范布局
-2. **检测不到已安装** —— 我检查的是 `安装路径\cc-ui.exe`，但你机器上管理器在 **D:\ClaudeCode**（有 cc.cmd/cc-role.ps1，没有 cc-ui.exe），所以没识别出来
-
-先修检测逻辑（识别启动器式安装）+ 智能默认路径（找到已安装的 D:\ClaudeCode）：
-助手: 现在重写 Show-Wizard（规范布局 + 智能默认路径）。先读当前函数：
-助手: 重写 Show-Wizard——规范布局（字段全宽、按钮右下、Segoe UI）+ 智能默认路径（识别 D:\ClaudeCode）：
-助手: 语法检查 + 验证检测逻辑（现在应能识别 D:\ClaudeCode）+ 重建：
-助手: WIZARD SYNTAX OK，检测逻辑正确（D:\ClaudeCode = True）。但测试 dot-source 时 line 110 报 op_Multiply 错——检查那行：
-助手: 测试那行表达式是否有问题：
-助手: 找到问题：`New-Object Size($W - $M * 2, 40)` 里带 `*` 的表达式被 PowerShell 误解析。把所有算术预计算成变量再传：
-助手: 替换内联表达式为预计算变量：
-助手: 验证布局不再报错（用最小表单复现布局构建 + 自动关闭）：
-助手: 布局构建 + 渲染 OK（无 op_Multiply 错误）。重新打包 + 更新知识库：
-助手: 两个问题都修好了，安装器已重建。
-
-## 1. 界面重做（不再混乱）
-
-重新设计了 WinForms 布局：
-- **Segoe UI 字体** + 标题（粗体）+ 副标题
-- 字段**全宽**，浏览按钮右对齐，行距统一
-- **按钮移到右下角**（标准 Windows 布局：安装 / 卸载旧版 / 取消）
-- 布局常量全部预计算（修了一个 `New-Object Size($a * 2, 40)` 的 PowerShell 解析 bug——带 `*` 的表达式被误解析成数组乘法报错）
-
-## 2. 安装检测修正
-
-**你之前的疑问点对了**——之前我只检测 `安装路径\cc-ui.exe`（冻结 app），但你机器上管理器在 **D:\ClaudeCode**（是启动器式安装：有 `cc.cmd` + `cc-role.ps1`，没有 cc-ui.exe），所以识别不出。
-
-现在检测逻辑：
-```
-已安装判定 = 有 cc-ui.exe（冻结版） 或 有 cc.cmd + cc-role.ps1（启动器式）
-```
-**智能默认路径**：向导先扫 `%LOCALAPPDATA%\ClaudeCodeManager` 和 `D:\ClaudeCode`，找到已安装的自动填进去，并提示「检测到已有安装：D:\ClaudeCode → 点安装=覆盖升级 / 先点卸载旧版」。
+给 `cc-config-read.ps1` 加回 UTF-8 BOM（用二进制方式补 `\xef\xbb\xbf`，避免文本重写再次丢 BOM）。
 
 ## 验证
 
-| 项 | 结果 |
-|---|---|
-| `D:\ClaudeCode` 检测 | ✅ True（之前 False） |
-| 表单构建 + 渲染（9 控件） | ✅ 无布局错误 |
-| 安装器 GUI 子系统 | ✅ 无黑窗 |
-| 全新/覆盖升级/卸载/配置选择 | ✅ |
+修复前输出 9 行（缺 `ANTHROPIC_MODEL`），修复后 10 行：
 
-现在你（或目标机用户）运行 `ClaudeCodeManager-setup.exe`：弹出的是**整齐的图形…
-用户: 检测 .exe 是没问题的，问题是我的电脑上也有 cc-ui.exee 呀：D:\ClaudeCode\dist\cc-ui
-助手: 你的 `D:\ClaudeCode\dist\cc-ui` 其实是 **PyInstaller 构建产物**（冻结的 app），不是管理器的"安装目录"。真正的管理器在 `D:\ClaudeCode`（有 cc.cmd / cc-role.ps1 / roles / skills / cc-config.json）。
+```
+ANTHROPIC_MODEL|deepseek-v4-flash     ← 恢复
+ANTHROPIC_SMALL_FAST_MODEL|deepseek-v4-flash
+CLAUDE_CODE_SUBAGENT_MODEL|deepseek-v4-flash
+CLAUDE_CONTEXT_COL…
+用户: 处理一下
+助手: 处理好了。
 
-我的检测**已经把 D:\ClaudeCode 识别为已安装了**（通过 cc.cmd + cc-role.ps1）。让我实际跑一遍验证给你看：
-助手: 验证结果——**你的两种情况其实都被正确检测到了**：
+## 完成
 
-| 检测点 | 结果 |
-| --- | --- |
-| `D:\ClaudeCode`（管理器配置家目录） | ✅ 已安装（cc.cmd + cc-role.ps1） |
-| `D:\ClaudeCode\dist\cc-ui`（你的 exe 位置） | ✅ 也识别为已安装（cc-ui.exe） |
-| 向导智能默认路径 | **D:\ClaudeCode** |
+删掉了 `settings.json` 里的 `"model": "glm-4.7"`。现在 JSON 合法，其余字段（`skipDangerousModePermissionPrompt`、`theme`、`autoUpdates`、`cleanupPeriodDays`、`hooks`）完整保留。
 
-## 澄清一个概念
+## 现在的模型链路（干净了）
 
-你机器上有两个目录，但性质不同：
+```
+cc-config.json  →  cc-config-read.ps1（已加 BOM）  →  ANTHROPIC_MODEL  →  claude
+   default=deepseek     输出 deepseek-v4-flash         （正确传递）
+```
 
-| 目录 | 是什么 | 该不该升级/安装到 |
-| --- | --- | --- |
-| **`D:\ClaudeCode`** | 管理器的**家目录**：cc.cmd / cc-role.ps1 / roles / skills / **cc-config.json** / 会话数据 | ✅ **这才是要装/升级的地方** |
-| `D:\ClaudeCode\dist\cc-ui` | **PyInstaller 构建产物**（冻结的 cc-ui.exe + _internal），是我打包时的输出目录 | ❌ 只是编译输出，不存配置/数据 |
+- 模型**只由 `cc-config.json` 决定**，随 `cc provider switch` 切换正确变化
+- `settings.json` 里不再残留一个和 provider 打架的 `glm-4.7`
 
-## 所以向导实际会怎样
+## 两个 bug 的最终状态
 
-打开向导 → **自动识别到 `D:\ClaudeCode` 已有安装**（默认路径自动填成它）→ 状态区提示「检测到已有安装：D:\ClaudeCode，点安装=覆盖升级（保留数据/密钥）」→ 你点「安装」就直接升级你正在用的管理器。
+| Bug | 根因 | 修复 |
+|---|---|---|
+| 角色↔会话关联丢失 | `prune_stale` 用裸 `fromisoformat` 解析 7 位小数时间戳 → 误删刚启动的会话记录 | 改用 `iso_to_ms`；并恢复了 2 条丢失的 uidesigner 关联 |
+| 用了没配的 deepseek-v4-pro | `cc-config-read.ps1` 丢 BOM → 中文注释吞掉 `ANTHROPIC_MODEL` 行 → 模型环境变量没设 | 补回 BOM；删掉 settings.json 残留的 model |
 
-就算你手动浏览到 `dist\cc-ui`，也会被识别为已安装（cc-ui.exe 检测到了）。只是**升级的正确目标应该是 D:\ClaudeCode**（配置和数据的家），所以默认路径选它是对的。
+**记住**：当前正在运行的这个会话仍是 v4-pro，**下次新建/恢复会话才会切到 `deepseek-v4-fla…
+用户: 两个 BUG：1. 既然当前模型用的不是 pro 了，你 APP 里面各个位置的模型列也应该更新为 flash！请你自行检查所有用到的地方；2. 我的安装包安装后在用户电脑上显示 ‼Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API key (ANTHROPIC_API_KEY) are set. This may lead to
+  unexpected behavior.                                                                                                      · Trying to use ANTHROPIC_AUTH_TOKEN? Unset the ANTHROPIC_API_KEY environment variable, or claude /logout then say
+    "No" to the API key approval before login.
+    · Trying to use ANTHROPIC_API_KEY? Unset the ANTHROPIC_AUTH_TOKEN environment variable.，我自己电脑现在也会显示 ‼ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected
+   · to use ANTHROPIC_AUTH_TOKEN: Unset the ANTHROPIC_API_KEY environment variable, or claude /logout then say "No" to
+  …
+助手: 收到，这个任务量大，我先建任务清单追踪，然后并行调查。
+助手: 先看实际数据——transcript 里记录的模型，以及打包脚本的位置。
+助手: 关键发现：模型列显示的是 transcript 里**所有** model 的合并，包括 `<synthetic>` 伪模型和旧 bug 期间的 `deepseek-v4-pro`。让我确认 `<synthetic>` 的情况，并读取打包脚本、查证 claude 版本认证行为。
+助手: `<synthetic>` 是 assistant 消息的伪模型标记，确实污染了模型列。继续读打包脚本，并查证 claude 版本与认证变量支持。
+助手: 打包流程清楚了。现在查证 claude 版本与 `AUTH_TOKEN` 支持的阈值，然后开始改代码。
+助手: 版本阈值确认：`AUTH_TOKEN`（Bearer）用于自定义 base URL，claude 1.0.0+ 支持；老版 0.x 只认 `API_KEY`。方案：**按 claude 版本只设一个认证变量**，不同时设两个。
 
-换句话说——**你不需要担心**：向导能识别出你机器上装着的管理器，并默认就地…
-用户: 你只会在我当前选择的安装目录找之前是否安装过吗？比如我之前已经装在 C 盘了，我希望的是先把 C 盘的卸载了，然后再安装到我指定的位置，现在是这样吗？
-助手: 你问得对——现在**只在当前选择的路径 + 两个固定默认位置**里找，不会扫 C 盘的旧安装。如果你之前装在 C 盘、现在想装到 D 盘，向导会当成"全新安装"，不会先卸载 C 盘那个——结果就是两个安装并存、环境变量互相打架。
+先标记任务，开始修 BUG 1（模型列污染）。
+助手: 验证 BUG 1 修复（清缓存后重新解析）：
+助手: d87ff067 在别的目录，我路径写错了。验证一下 glm 会话和完整扫描：
+助手: BUG 1 完成，模型列现在干净显示单个真实模型。标记完成，开始 BUG 2（auth conflict）。
+助手: Edit 会丢 BOM，补回并测试：
+助手: BOM 保留。测试输出（当前 claude 是新版，应只出 AUTH_TOKEN）：
+助手: 新版输出正确（只出 AUTH_TOKEN）。现在测试老版分支——mock 一个 0.x 的 claude：
+助手: 老版分支正确。修正「claude 不存在」测试（之前 PATH 把 powershell 也清掉了）：
+助手: 用 fake claude 空输出来验证「检测失败 → 默认 AUTH_TOKEN」分支：
+助手: 三个认证分支全部验证通过（新版→AUTH_TOKEN / 老版0.x→API_KEY / 检测失败→默认AUTH_TOKEN）。BUG 2 完成。
 
-这是真问题。我改成：**扫描常见安装位置**，发现其他位置的旧安装就提示「将先卸载旧安装再装到新位置」（可勾选自动卸载）。
+现在做卸载程序 + 数据接回机制。
+助手: 设计数据接回机制：卸载「保留数据」时把用户数据备份到全局位置 `%LOCALAPPDATA%\ClaudeCodeManager-data`；下次安装 setup.ps1 自动检测并恢复合并到新安装目录。
 
-先加 `Find-Installs` 扫描函数 + 更新向导。读当前 wizard.ps1：
-助手: 加 `Find-Installs` 扫描函数：
-助手: 更新向导：加"自动卸载旧安装"勾选框 + 状态提示其他位置的旧安装 + 安装前自动卸载。读当前相关部分：
-助手: 改向导——加"其他位置旧安装"提示 + 自动卸载勾选框。先调布局常量：
-助手: Now replace the status label + add the other-installs label and auto-uninstall checkbox:
-助手: 更新 Update-Status（也提示其他位置安装 + 控制勾选框）和安装处理器（先自动卸载其他位置）：
-助手: 语法检查 + 测试 Find-Installs 扫描逻辑：
-助手: Find-Installs 正确：能扫出 C:\ClaudeCodeManager + D:\ClaudeCode 等多处旧安装。重新打包：
-助手: API Error: 400 This model's maximum context length is 1048576 tokens. However, you requested 1048945 tokens (1016945 in the messages, 32000 in the completion). Please reduce the length of the messages or completion.
-用户: /compact
-用户: <local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>
-用户: <command-name>/compact</command-name>
-            <command-message>compact</command-message>
-            <command-args></command-args>
+写卸载程序：
+助手: 给 setup.ps1 插入数据恢复逻辑：
+助手: 改 wizard.ps1：增强 Find-Installs 扫描所有盘符、自动卸载默认关闭 + 二次确认（防止误删开发目录 D:\ClaudeCode 这类含 .git 的目录）。
+助手: 把 uninstall.ps1 打进 zip 的 package/ 根（setup.ps1 复制 package 时会自动带进安装目录）：
+助手: 检查所有修改过的 ps1 文件的 BOM 和语法：
+助手: bash 变量在单引号里没展开。修正语法检查命令：
+助手: 让我先诊断 bash 变量展开问题：
+助手: 语法全部 OK。现在验证卸载程序的两个模式（用临时目录隔离，不碰真实环境）：
+助手: cmd 的双引号嵌套转义问题。改用 bash 直接传环境变量调用 powershell：
+助手: 保留数据模式验证通过。继续测试完全卸载模式 + setup.ps1 恢复逻辑：
+助手: 完全卸载和恢复逻辑都通过。现在验证任务 4：Find-Installs 任意位置扫描 + Remove-Install（复制函数到临时脚本测试，只对假目录执行删除）：
+助手: 任务 3、4 验证完成。标记并开始打包。先看 spec 文件确认构建命令：
+助手: 构建流程确认。先构建 cc-ui app exe（含 store.py 的模型修复）：
+助手: cc-ui 构建成功。现在组装 package 并压缩安装数据：
+助手: 验证 zip 里包含 uninstall.ps1，且 package 里的启动器是修复后的版本：
+助手: 全链路验证通过。现在做一次**隔离的 setup.ps1 完整测试**（验证恢复 + uninstall 落位 + 无副作用残留），完成后清理环境副作用：
+助手: 发现两个问题：**setup.ps1 恢复逻辑对已存在的 roles 目录会嵌套复制**（`Copy-Item dir destDir` 在目标存在时生成 `dest/roles/roles/`），且清理脚本语法错误导致环境残留。**先立即清理环境残留**：
+助手: 环境已恢复原状。现在修复两个脚本的目录复制嵌套 bug：
+
+1. **setup.ps1 恢复**：目标目录已存在时逐项合并，避免嵌套
+2. **uninstall.ps1 备份**：先删旧备份目标再复制
+助手: 重测：setup.ps1 恢复（验证 roles 不嵌套）+ uninstall.ps1 重复保留（验证不嵌套）。用临时脚本文件避免 bash 引号问题：
+助手: 发现 `uninstall.ps1` 没随 package 落位——因为它只在 zip 里被单独加，而 setup.ps1 直接从 `package/` 目录复制。修正：让 `assemble_installer.py` 把 uninstall.ps1 放进 package 根，`zip_installer.py` 就不用单独加了。
+助手: 重新 assemble + zip，然后重测（验证 uninstall.ps1 落位 + 重复保留不嵌套）：
+助手: 重测 setup.ps1（uninstall.ps1 落位）+ uninstall.ps1 重复保留不嵌套：
+助手: 全部通过。最后一步：PyInstaller 打安装器 exe：
+助手: 安装器构建成功。最终验证产物：
+助手: 打包完成。但发现一个用户体验问题：Windows 双击 `.ps1` 默认用记事本打开，用户没法双击卸载。补一个 `uninstall.cmd` 双击入口：
+助手: 重新 assemble + zip + 打包安装器（最终版）：
+助手: 最终端到端验证——从 zip 解压（模拟真实安装器解压行为）跑 setup.ps1：
+助手: 从 zip 解压跑 setup.ps1 失败。诊断——看完整输出和解压结构：
+助手: 问题找到了——是我的测试脚本用 MSYS 路径（`/tmp/...`）传给 Windows python，解压到了错误位置，不是 setup.ps1 的问题。改用 Windows 路径重测：
+助手: 端到端安装测试通过（uninstall.cmd/ps1 落位、BOM、无 model）。但 setup.ps1 设置了真实用户环境变量，需立即清理：
+助手: 环境已清理。打包与验证全部完成。标记任务完成并沉淀知识：
+助手: 知识库已沉淀。最后确认产物和改动状态：
+助手: 全部完成。以下是完整交付汇报。
+
+## ✅ 两个 BUG 已修复
+
+### BUG 1：APP 模型列显示 pro / `<synthetic>` 脏值
+**根因**：模型列读的是 transcript 里**所有** assistant 消息的 `model` 字段合并，而 claude 会写入伪模型标记 `<synthetic>`，且同一会话 `/model` 中途切换会累积多个历史模型。所以模型列显示 `deepseek-v4-pro`、`<synthetic> deepseek-v4-flash` 这类乱值。
+
+**修复**（`ccui/session/data/store.py`）：过滤 `<synthetic>` 伪模型 + 只保留**最后一条真实模型**。现在：
+- 当前会话 → `deepseek-v4-flash`（最后用的是 flash）✓
+- 全部会话模型列干净，无 `<synthetic>`、无历史模型堆叠
+- 已重新构建 `cc-ui.exe` 并进安装包
+
+### BUG 2：`auth conflict`（两个认证变量同时设置）
+**根因**：`cc-config-read.ps1` 同时输出 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_API_KEY`（为了兼容老版 claude），新版 claude 检测到两个都设就报冲突警告。
+
+**修复**（`cc-config-read.ps1`）：**按 claude 版本只设一个**——跑 `claude --version`，0.x 老版只设 `API_KEY`，≥1.0 新版只设 `AUTH_TOKEN`（自定义 base URL 的 Bearer）。三分支已验证：新版→AUTH_TOKEN、老版 0.8.5→API_KEY、检测失败→默认 AUTH_TOKEN。不…

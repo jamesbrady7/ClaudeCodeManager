@@ -252,6 +252,7 @@
 
 ## 发布安装包（已构建）
 - **产物**：`dist/ClaudeCodeManager-setup.exe`（52MB，PyInstaller 单文件自解压安装器）；`dist/cc-ui/cc-ui.exe`（便携版 app）
+- **配置目录**（infra/config.py）：非冻结→D:\ClaudeCode；冻结→**exe 所在目录**（安装版，setup.ps1 保证目录里有 cc-config.json 模板 + 14 技能 + roles，exe 双击功能完整）。dist/cc-ui 是构建产物（只有 exe+_internal 无数据），**单独双击缺技能/角色是预期**，不是 bug——要完整功能用安装包装出来的 exe。曾尝试给便携 exe 加"回退 D:\ClaudeCode"被用户否决（不要硬编码本地目录），保持标准行为
 - **打包流程**：PyInstaller 打 app exe（`--windowed --icon=icon.ico --add-data "ccui/app/assets;ccui/app/assets"`）→ `scripts/assemble_installer.py` 组装 package（便携 app + 启动器 cc.cmd/cc-role.ps1/roles/skills/settings.json）→ `zip_installer.py` 压成 installer-data.zip（46.5MB）→ `installer_main.py`（解压 + 跑 setup.ps1）PyInstaller `--onefile --add-data "installer-data.zip;."`
 - **setup.ps1**：装到 `%LOCALAPPDATA%\ClaudeCodeManager`；生成 settings.json（SessionStart hook 指向安装目录的 track-session.ps1）+ cc-config.json 模板（无密钥）；设 `CLAUDE_CONFIG_DIR`(User) + 安装目录入 PATH；桌面快捷方式（章鱼图标 `IconLocation=<exe>,0`）；**检查 claude，缺则 `npm install -g @anthropic-ai/claude-code`**（node 缺失则提示）
 - **可移植化**：cc.cmd 的 `D:\ClaudeCode` 硬编码全改 `%~dp0`（cmd 必须 CRLF 行尾否则语法错）；cc-config-read/cc-provider 用 `$env:CLAUDE_CONFIG_DIR` 兜底；`config.py` 冻结时默认 CONFIG_DIR = exe 目录
@@ -262,7 +263,19 @@
 - **已知限制**（诚实告知）：仅 64 位 Windows 10/11（exe 是 64 位）；自动安装需联网（下载 Node/npm）；未签名 exe 会触发 SmartScreen（点"仍要运行"）；PATH 改动需新开终端
 - **图形安装向导（wizard.ps1）**：WinForms 表单——可选安装目录（默认 %LOCALAPPDATA%\ClaudeCodeManager，可改到非系统盘）、可选 cc-config.json（用户已有 provider 配置，给了就装成 Dest\cc-config.json）、检测已有安装（提示覆盖升级或先卸载）、「卸载旧版」按钮（删快捷方式/环境变量/目录）。`setup.ps1` 加 `-Dest/-ConfigPath` 参数；installer_main.py 跑 wizard.ps1
 - **合并升级（覆盖不删数据）**：setup.ps1 **不再 `Remove-Item` 整个目录**——只覆盖应用/启动器脚本，`roles`/`skills` 合并（保留用户自定义），cc-config.json/projects/sessions 等用户数据保留；升级时用户填的密钥不会丢
-- **兼容老版 claude**：`cc-config-read.ps1` 同时输出 `ANTHROPIC_API_KEY`（老版用）和 `ANTHROPIC_AUTH_TOKEN`（新版用）——否则老 claude 认不出 provider 配置，回退 api.anthropic.com 报 ERR_BAD_REQUEST；且目标机 cc-config.json 是空模板（安装器不打包密钥），用户必须填真实 apiKey（或从开发机复制 cc-config.json）
+- **认证变量按 claude 版本二选一**（⚠️ 曾同时设 `ANTHROPIC_AUTH_TOKEN`+`ANTHROPIC_API_KEY` 触发新版 "auth conflict" 警告且行为不可预期）：`cc-config-read.ps1` 跑 `claude --version`，**0.x 老版→只设 API_KEY；≥1.0 新版→只设 AUTH_TOKEN**（自定义 base URL 的 Bearer）；claude 不在 PATH 默认新版。老 claude 不认 AUTH_TOKEN 会回退 api.anthropic.com 报 ERR_BAD_REQUEST；目标机 cc-config.json 是空模板（安装器不打包密钥），用户必须填真实 apiKey
+
+## 卸载程序与数据保留（uninstall.cmd/ps1）
+- 卸载程序随 package 落到安装目录根：`uninstall.cmd`（双击，.ps1 双击只会记事本）→ `uninstall.ps1` 图形询问（是=保留数据、否=完全卸载、取消）
+- **保留数据**：用户数据（cc-config.json/projects/sessions/roles/skills/ui-state/session-providers/history 等）复制到 `%LOCALAPPDATA%\ClaudeCodeManager-data`（全局，与安装位置无关）→ 删安装目录 + 清快捷方式/CLAUDE_CONFIG_DIR/PATH；**下次安装 setup.ps1 自动检测该目录并合并恢复**（数据优先覆盖包内）→ 删除备份。完全卸载模式额外询问是否删历史备份
+- **⚠️ Copy-Item -Recurse 目录嵌套坑**：`Copy-Item srcDir destDir -Recurse` 当 destDir **已存在**时把 srcDir 整个嵌成 `destDir\<srcDir名>\`（roles→`dest\roles\roles\`）。目录合并必须逐子项复制（`New-Item destDir; Get-ChildItem srcDir | ForEach Copy-Item -Recurse`）；备份侧先删旧目标再复制
+- **打包流更新**：uninstall.cmd/ps1 由 assemble_installer.py 复制进 package 根（不是 zip 单独加），setup.ps1 复制 package 时落位；改脚本后必须重跑 assemble→zip→PyInstaller setup.spec
+- Find-Installs/Remove-Install：判定=有 cc-ui.exe 或 (cc.cmd+cc-role.ps1)；扫所有盘符根 ClaudeCodeManager/ClaudeCode；自动卸载**默认不勾选** + 删除前二次确认并标注含 .git 目录（防误删 D:\ClaudeCode 这类开发目录）
+- **测试副作用清理**：跑 setup.ps1 会真实设置 User 环境变量（CLAUDE_CONFIG_DIR/PATH）+ 桌面快捷方式，测试后必须 `SetEnvironmentVariable(...,$null,'User')` 恢复 + 删快捷方式；给 python 传路径要用 cygpath -w（MSYS /tmp 路径 Windows python 不认，解压会去错地方）
+
+## 会话模型列（<synthetic> 过滤 + 最后模型）
+- `store._parse_transcript` 曾 `models.add(msg['model'])` 累积所有 assistant 模型 → 模型列显示 `<synthetic> deepseek-v4-pro` 等脏值（claude 会写 `<synthetic>` 伪模型；同会话 /model 中途切换会累积多个历史模型）
+- 修复：过滤 `startswith('<')` 伪模型，只保留**最后**一条真实模型（模型列 = 会话当前/最终用的模型，切换后显示最新的）；`models` 仍是 list（provider 推断 `set(models)` 兼容单元素）；改解析逻辑后 `_SUMMARY_CACHE` 需清空才见新值
 
 ## 安装向导二次优化（GUI + 检测）
 - **纯图形**：安装器 exe 用 `--windowed`（Windows GUI 子系统，无控制台黑窗）；wizard.ps1 用 WinForms（Segoe UI、标题+副标题、字段全宽、浏览按钮右对齐、按钮右下角标准布局）
