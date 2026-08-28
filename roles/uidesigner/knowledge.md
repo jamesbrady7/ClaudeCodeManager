@@ -25,6 +25,7 @@
 - 关联记录在 `roles/<role>/sessions.jsonl`（`{session_id, timestamp, cwd}`），`ccui/role/data/store.py::session_role_map()` 反查全局 `session_id → 角色名`
 - 主会话面板用它显示「角色」列；角色面板用它交叉引用 transcript 出标题/轮数/模型
 - **孤儿记录**：hook 启动即记录 session_id，无 transcript 的会残留 → 角色面板只显示 `s.exists` 的会话；`role_service.prune_stale_role_sessions` 年龄守卫清理（无 transcript 且旧于 10 分钟）
+- **⚠️ sessionCount 与列表不一致**：`RoleManager._load` 曾用 `len(tracked)`（含孤儿）作 sessionCount，角色列表显示 5 但列表只有 4（孤儿被隐藏）。修复：`roles(existing_ids, live_ids)` 支持传入 SessionManager 的 by_id/live_ids，过滤孤儿（只统计**有 transcript 或 live** 的记录）→ sessionCount 与角色会话列表一致；role_panel._load_roles 传 `set(sm.by_id())` + `sm.live_ids()`（by_id 有解析缓存，非热路径可接受）；不传参时行为不变
 
 ## 事件驱动架构（SignalHub）
 - `ccui/infra/signalhub.py`：纯 Python 事件总线（单例）`emit(event, **payload)` / `subscribe(event, fn)`；「谁改数据谁通知」
@@ -179,6 +180,7 @@
 ## 三项修复（未来时间戳/角色会话模式/列分布）
 - **⚠️ 未来时间戳脏数据**：transcript 里可能混入 `timestamp=2099-01-01` 这类异常条目（顶层 user 行），`_parse_transcript` 取最大时间戳时把它当 lastTime → 时间列显示 `01-01 08:00`。修复：**过滤未来时间戳**（`iso_to_ms(ts) <= now+1h`，容忍时钟偏差）；`build_inherit` 的 first_ts 同理
 - **创建角色会话可选权限模式**：InheritDialog（cwd_visible=True 即该场景）加 `cb_mode` 下拉；`role_service.start_role(name, from_ids, cwd, mode)` 传 `--mode danger`；**cc-role.ps1 Start-Role 加 `--mode` 解析**（danger 时 `& $claudeCmd danger`，与恢复会话语法一致）；role_panel._start 传 `dlg.mode()`
+- **创建角色会话可选 Provider**：InheritDialog（cwd_visible）再加 `cb_provider` 下拉（`providers/default_provider` 参数，item 带 `provider_icon`）；`start_role(..., provider='')` 时 args 插 `--provider <p>`（任意位置，cc.cmd 顶部 for 循环解析 CC_PROVIDER → cc-config-read -Provider p 注入环境变量，cc-role.ps1 忽略该参数但继承环境启动 claude）；已验证 `cc role uidesigner --provider qwen` 注入 MODEL=qwen3.8-flash/BASE=dashscope/KEY 正确；非 cwd_visible（新建会话继承弹窗）不显示 provider 下拉、`provider()` 返回空
 - **继承/删除对话框列分布**：InheritDialog（会话/时间）、DeleteDialog（会话/项目）列宽不平衡——加 `header.setStretchLastSection(False)` + col0 `Stretch` + col1 `ResizeToContents`，标题列吃满剩余、次要列收缩到内容
 
 ## 技能列表交互拆分（编辑 vs 勾选不冲突）
@@ -273,7 +275,38 @@
 - Find-Installs/Remove-Install：判定=有 cc-ui.exe 或 (cc.cmd+cc-role.ps1)；扫所有盘符根 ClaudeCodeManager/ClaudeCode；自动卸载**默认不勾选** + 删除前二次确认并标注含 .git 目录（防误删 D:\ClaudeCode 这类开发目录）
 - **测试副作用清理**：跑 setup.ps1 会真实设置 User 环境变量（CLAUDE_CONFIG_DIR/PATH）+ 桌面快捷方式，测试后必须 `SetEnvironmentVariable(...,$null,'User')` 恢复 + 删快捷方式；给 python 传路径要用 cygpath -w（MSYS /tmp 路径 Windows python 不认，解压会去错地方）
 
+## 「模型」tab：Provider 两层配置 + 启动选模型（2026-08-28）
+- **两层格式=兼容扩展**：`cc-config.json` provider 保留 `model`/`fastModel`（语义=池中"主/快"），新增可选 `models: []`；老 `cc-config-read.ps1` 只读老字段 → 新格式对旧启动器零破坏；读时无 models 由 `store.provider_models()` 现算（不回写脏化）
+- **key 放 provider 级**（用户决策）：同厂商 N 模型共用 key；不同 key 场景=建两个同名 baseUrl 的 provider
+- **新模块 `ccui/provider/`**：data/store（cc-config.json **唯一写通道**，读-改-写保未知字段/键序、临时文件+os.replace 原子写、写前滚 .bak）+ service（CRUD 全返 `(ok,msg)`、成功 emit `providers.changed`）+ view（provider_panel 左列表右详情+模型表、dialogs）
+- **守卫**：删模型必须非主/非快引用；重命名模型同步跟随 model/fastModel；删默认 provider 自动顺延；模型名校验镜像 ps1 的 Test-ValidModelName（拒空/URL/sk- 前缀/空格/斜杠）；UI 层 READONLY 禁写
+- **`--model` 透传=照抄 `--provider` 机制**：cc.cmd 顶部扫 `%*` → `CC_MODEL_ARGS=-Model x` 传给 cc-config-read.ps1（覆盖 ANTHROPIC_MODEL，先于 fastModel 回退判定）→ env 控制 claude。**cc-role.ps1 一行不用改**（未知 token 天然被它跳过，--provider 现状即如此）；且 `--provider/--model` 不会泄漏进 claude 命令行（各分支只显式传 --resume %3 等）
+- **级联下拉**：`session/view/dialogs.py::ModelComboBox.populate(cfg, preselect)`（条目 userData=模型名，显示加「· 主/快」）；三 dialog 构造加 `providers_map=provs['providers']` + `model()`；ResumeDialog 预选=会话上次模型 `models[-1]`（不在池中自动回落主模型）
+- **主窗**：新 tab 必须**追加为 index 3**（`_delete_context` 硬编码 0=会话）；tab 图标新下 boxes.svg；「用此 Provider 新建会话」=`new_session_requested(provider,model)` 信号 → 主窗切 tab0 + `on_new_session(preset_provider, preset_model)`
+- **`on_new_session` 首参被 `clicked(bool)` 污染坑**：加预置参数后按钮连接须改 `lambda: on_new_session()`
+- **session.data.provider 跨模块隔离**：`infer_provider` 改扫整个模型池但**不 import** provider 模块（models 字段本就在传入 cfg 里，同构内联）
+- **坑**：`QListWidgetItem.setToolTip(text)` **不带列参**（QTreeWidgetItem 才带列，混用 TypeError）；offscreen 测试触发带模态对话框连接的信号会**卡死 exec()**（验证 emit 用独立 widget，别连主窗槽）
+- **⚠️ unpkg 下载 svg 必须 `curl -sfL`（跟随重定向）**：lucide-static 会 302 到 `/lucide-static@x.y.z/...`，无 `-L` 拿到的是 "Redirecting to…" 文本，Qt 渲染空白**不报错**（tab 图标/eye 不显示的根因）。落盘后必须 `grep -q "<svg"` 验证；simple-icons 用 `cdn.simpleicons.org/<slug>`（品牌色，anthropic/kimi/minimax 有，siliconflow/volcengine 无→首字母徽章）
+- **主流 provider Anthropic 兼容端点（官方文档核实，空 key 种子在 cc-config.json）**：kimi=`https://api.moonshot.cn/anthropic`、minimax=`https://api.minimaxi.com/anthropic`（国际 .io）、siliconflow=`https://api.siliconflow.cn/v1`（Messages 格式）、volcengine=`https://ark.cn-beijing.volces.com/api/coding`（Coding Plan；通用 v3/Agent plan 地址不同不可混用）、anthropic=`https://api.anthropic.com`
+- **密钥明文显隐**：面板级用 `_reveal_for` 记录归属 provider——reload/防抖刷新**不收回**当前 provider 的明文，切换 provider 才重置；QLineEdit trailing eye action 要随 toggled **换图标**（eye↔eye-off），否则用户以为失效
+- **按钮语义色**：`QPushButton#btnSuccess` 绿色渐变（theme.py，与 #btnNew 同构，background 用不透明色）；主操作统一 PressButton+btnNew，文本不再手写「+」（与 plus 图标双号）
+- **图标语义色板（治"灰图标融入深色背景"）**：`icons.py::ICON_TINTS`（Apple dark 语义色：play/upload/shield-check=绿、trash/shield-off=红、clock/eye/download/settings=青、database/boxes/folder/broom=橙黄、users/repeat/book-open=紫、message-square/cpu/wrench=蓝、search/copy 中性），`ui_icon(name,size,color=None)` 省略色自动查表（**缓存键含解析后颜色，无需清缓存**）；语境色（主按钮白、菜单深）仍显式传。批量迁移：正则剥 `'#c8c8cc|d4d4d8|9a9aa0|6b6b70'` 实参——**注意变量名形式（`ui_icon(icon, 12, '#9a9aa0')` 列头/分组图标）正则不匹配，需手工补**。技能管理页的图标选择器现在预览即成品色（合理）
+- **cc-config.json 种子 provider 集**（用户 2026-08-28 定，最终）：deepseek/glm/qwen/kimi/minimax/anthropic/xiaomi（**gpt/doubao 用户后要求删除**——gpt 无官方 Anthropic 端点需自跑 CCR 代理、doubao 需方舟 Coding Plan 订阅，都不通用）；simple-icons 有 xiaomi/kimi/minimax/anthropic logo（`cdn.simpleicons.org/<slug>` 必须 `-L`），openai/doubao/siliconflow/volcengine 无 logo→首字母徽章
+- **品牌 logo 深色底提亮（`icons.py::brand_svg_icon` + `_svg_needs_tint`/`_tint_svg_text`）**：simple-icons/lobe 类单色 logo（`fill="currentColor"` / 纯黑 `#000`·`#191919` / 无 fill=默认黑）在深色界面直接隐形——kimi/apple/github/grok/ollama/anthropic 全中招。检测规则：含 `url(#` 渐变 → 保留；任一 `fill/stroke="#hex"` 近白(min>200) 或高饱和品牌彩(mx-mn>70) → 彩色 logo 保留原样（防白底白字/误染）；否则判为单色暗 logo → `currentColor` 与暗色 fill/stroke 统一替换为 `#ececf1` 近白。验证：10 个暗 logo 0→236 提亮，14 个彩色 logo fixed==raw 零改动。路由点：provider_icon/role_icon/`_svg_content_pixmap`(头像+大 Hero)/IconPickerDialog 网格/skill 分组图标全走它——**凡 `QIcon(svgPath)` 直载品牌图都要改走 brand_svg_icon**，PNG 直通。坑：探针 `QIcon(p).pixmap(小尺寸)` 对细抗锯齿 glyph 可能 alpha>100 判 0 像素（假阴性），验证用 64px
+- **模型池"消失"bug + 物化设计（2026-08-28 修）**：老格式 provider 无 `models` 字段时池从 `{model,fastModel}` 并集**推导**——把默认+快速设成同一模型，另一个就从推导池蒸发（glm-5.2 消失事故）。根因两层：① `provider_models` 只并两指针；② `_set_role`(set_main/fast) 改指针前不快照旧池。修法三件套：(a) `provider_models` = 显式 models ∪ {model,fastModel}；(b) `write_config(materialize=True)` 每次写把并集**物化进 `models` 字段**→ 池成员与指针解耦；(c) 任何动指针前 `cfg['models']=provider_models(cfg)` 固化旧池（`_set_role` 是重灾区）。④ 迁移脚本给存量补显式 models（已恢复 glm-5.2）。
+- **术语定稿**：provider 下只两个特殊角色——**默认模型**(field `model`) + **快速模型**(field `fastModel`，后台/摘要)，UI 一律叫「默认」不叫「主」。建会话下拉**只列池内模型 + 标「· 默认」，去掉「· 快」标签**（快速模型是 provider 级后台概念，建会话时不出现）；空池显示占位「（该 Provider 暂无模型…）」userData=''。
+- **模型池表格布局（对齐+位置定稿）**：4 列 `模型名(ResizeToContents) | 默认(定宽56) | 快速(定宽56) | 空列(Stretch吸收剩余)`。默认/快速列各放一个居中「✓」（金/绿），同一模型既是默认又是快速则两列都打勾。**用定宽✓列而非 "★默认 ⚡快速" 文本**——★ 是窄文本字形、⚡ 被 Qt 当彩色 emoji 渲染偏宽，前缀宽度不齐导致文字错位；定宽居中列天然对齐，且空列在右把角色列拉到模型名旁（不再挤在最右）。表头列 `headerItem().setTextAlignment(c, AlignCenter)` 与单元格✓对齐。**模型名列禁用 ResizeToContents**（切 provider 时列宽随最长名字变、✓ 列左右跳动）→ 用 Interactive + 初始 240px，超长 ElideRight 省略，用户仍可拖。
+
+## 终端启动 + 恢复会话（目标机踩坑，2026-08-27）
+- **问题1：目标机终端老旧、章鱼渲染成方块 □□□、对话后输入框假死**——根因是 `cmd.exe + CREATE_NEW_CONSOLE` 落到 **legacy conhost**（当系统「默认终端应用」设为 Windows 控制台主机时）。conhost：点阵字体画不出 Ink 的块状字形（小章鱼/图标碎裂）、CJK 宽度错位致 TUI 重绘错乱、**QuickEdit 一点击就挂起整个进程**（= 无法输入）。开发机默认终端恰好是 Windows Terminal 所以从没暴露。
+- **修复**：`ccui/infra/process.py::spawn_terminal` 优先用 **`wt.exe`**（App Execution Alias，`shutil.which('wt')` 探测并缓存 `_WT_EXE`），强制开在 Windows Terminal，**无视系统默认终端设置**。找不到 wt 才回退 cmd+CREATE_NEW_CONSOLE（Win10 无 WT）。
+- **wt 两大实测要点**：① 自定义 env（CC_INHERIT 等）**会透传**给 wt 子进程（用 dump 全环境的 .cmd 验证，别用 `echo %VAR%>` 那种被 `>` 吞掉的假阴性）；② **wt 客户端进程 0.03s 秒退**（真正的 shell 由 WindowsTerminal 服务端托管），所以不能用它的 Popen 句柄判断会话存活。
+- **秒退处理**：wt 分支返回 `_Delegated()`（`pid=None`、`poll()=None`）。占位合并里 `if e.pid and ...` 因 pid=None 短路 → 跳过存活检测 → 占位一直显示到 transcript 物化被 matching 吸收（~1-2s）。若返回死掉的 wt pid，会在 2s grace 后误判「已退出」致占位行闪断。
+- **问题2：`No conversation found with session ID`**——根因是真 bug：`session_service.resume` 用 `CONFIG_DIR` 当 cwd 启动 `claude --resume <id>`，而 **claude 按「当前目录对应的项目」查 transcript**。开发机会话都在 D:\ClaudeCode（=CONFIG_DIR）被掩盖；目标机会话在别目录 → 找不到。修复：`resume(..., cwd=s.projectPath)`，两处调用方（session_panel/role_panel）传 `s.projectPath`/`ref.projectPath`；目录不存在回退 CONFIG_DIR。
+- **cwd 归一**：`projectPath` 是正斜杠形式（`C:/Users/x`），`spawn_terminal` 内 `os.path.normpath` 转反斜杠再给 `wt -d`。
+
 ## 会话模型列（<synthetic> 过滤 + 最后模型）
+
 - `store._parse_transcript` 曾 `models.add(msg['model'])` 累积所有 assistant 模型 → 模型列显示 `<synthetic> deepseek-v4-pro` 等脏值（claude 会写 `<synthetic>` 伪模型；同会话 /model 中途切换会累积多个历史模型）
 - 修复：过滤 `startswith('<')` 伪模型，只保留**最后**一条真实模型（模型列 = 会话当前/最终用的模型，切换后显示最新的）；`models` 仍是 list（provider 推断 `set(models)` 兼容单元素）；改解析逻辑后 `_SUMMARY_CACHE` 需清空才见新值
 

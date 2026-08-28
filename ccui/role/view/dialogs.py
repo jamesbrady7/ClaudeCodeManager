@@ -15,7 +15,7 @@ from ccui.skill.service.skill_service import SkillService
 from ccui.skill.view.dialogs import NewSkillDialog
 from ccui.app.dialogs import FadeDialog, mk_buttons
 from ccui.app.theme import ASSETS_DIR
-from ccui.app.icons import role_avatar
+from ccui.app.icons import role_avatar, brand_svg_icon
 from ccui.app.widgets import SkillGroupList
 
 
@@ -164,7 +164,7 @@ class IconPickerDialog(FadeDialog):
             for i, f in enumerate(files):
                 path = os.path.join(icons_dir, f)
                 btn = QToolButton()
-                btn.setIcon(QIcon(path))
+                btn.setIcon(brand_svg_icon(path, 40))
                 btn.setIconSize(QSize(40, 40))
                 btn.setToolTip(f)
                 btn.setFixedSize(52, 52)

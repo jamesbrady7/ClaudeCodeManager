@@ -92,7 +92,7 @@ class SessionPanel(QWidget):
         self.btn_new = PressButton('新建会话')
         self.btn_new.setIcon(ui_icon('plus', 15, '#ffffff'))
         self.btn_new.setObjectName('btnNew')  # Apple 蓝主按钮
-        self.btn_new.clicked.connect(self.on_new_session)
+        self.btn_new.clicked.connect(lambda: self.on_new_session())  # lambda 吞掉 checked 布尔
         toolbar.addWidget(self.btn_new)
         # 删除选中：纯图标（垃圾桶普世可辨识），危险红，tooltip 兜底
         self.btn_delete = QPushButton()
@@ -106,18 +106,18 @@ class SessionPanel(QWidget):
         self.btn_delete.setEnabled(not READONLY)
         toolbar.addWidget(self.btn_delete)
         self.btn_empty = QPushButton('清理空会话')
-        self.btn_empty.setIcon(ui_icon('broom', 15, '#c8c8cc'))
+        self.btn_empty.setIcon(ui_icon('broom', 15))
         self.btn_empty.setToolTip('一键删除所有空会话（有确认）')
         self.btn_empty.clicked.connect(self.on_clean_empty)
         toolbar.addWidget(self.btn_empty)
         # 导出/导入（zip）
         self.btn_export = QPushButton(' 导出')
-        self.btn_export.setIcon(ui_icon('download', 14, '#c8c8cc'))
+        self.btn_export.setIcon(ui_icon('download', 14))
         self.btn_export.setToolTip('导出选中会话为 zip')
         self.btn_export.clicked.connect(self._export_selected)
         toolbar.addWidget(self.btn_export)
         self.btn_import = QPushButton(' 导入')
-        self.btn_import.setIcon(ui_icon('upload', 14, '#c8c8cc'))
+        self.btn_import.setIcon(ui_icon('upload', 14))
         self.btn_import.setToolTip('从 zip 导入会话')
         self.btn_import.clicked.connect(self._import_sessions)
         self.btn_import.setEnabled(not READONLY)
@@ -130,7 +130,7 @@ class SessionPanel(QWidget):
         self.edit_search.setPlaceholderText('搜索标题 / 路径 / 模型…')
         self.edit_search.setMaximumWidth(240)
         self.edit_search.setClearButtonEnabled(True)
-        self.edit_search.addAction(ui_icon('search', 14, '#6b6b70'),
+        self.edit_search.addAction(ui_icon('search', 14),
                                    QLineEdit.ActionPosition.LeadingPosition)
         self.edit_search.textChanged.connect(self._schedule_rescan)  # 防抖：打字不逐键全量重建
         toolbar.addWidget(self.edit_search)
@@ -149,7 +149,7 @@ class SessionPanel(QWidget):
         for icon, col in (('message-square', 0), ('users', 1), ('clock', 2),
                           ('repeat', 3), ('cpu', 4), ('database', 5), ('activity', 6)):
             _model.setHeaderData(col, Qt.Orientation.Horizontal,
-                                 ui_icon(icon, 12, '#9a9aa0'), Qt.ItemDataRole.DecorationRole)
+                                 ui_icon(icon, 12), Qt.ItemDataRole.DecorationRole)
         # 全部 Interactive：用户可拖列宽；自动布局由 _apply_layout 管理
         for i in range(7):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
@@ -537,10 +537,13 @@ class SessionPanel(QWidget):
             item.setCheckState(0, Qt.CheckState.Checked)
 
     # ---- 动作（委托给 service）----
-    def on_new_session(self):
+    def on_new_session(self, preset_provider='', preset_model=''):
         provs = self.service.list_providers()
-        dlg = NewSessionDialog(provs['names'], provs['default'], self._last_cwd, self,
-                               sessions=self.sessions)
+        dlg = NewSessionDialog(provs['names'], preset_provider or provs['default'],
+                               self._last_cwd, self, sessions=self.sessions,
+                               providers_map=provs['providers'])
+        if preset_model:
+            dlg._populate_model(preset_model)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         cwd = dlg.directory()
@@ -551,13 +554,16 @@ class SessionPanel(QWidget):
         self._last_cwd = cwd
         inherit_ids = dlg.inherit_ids()
         inherit_path = self.service.build_inherit(inherit_ids) if inherit_ids else None
-        spawned = self.service.new_session(cwd, provider, mode=dlg.mode(), inherit_path=inherit_path)
+        spawned = self.service.new_session(cwd, provider, mode=dlg.mode(),
+                                           inherit_path=inherit_path, model=dlg.model())
         if spawned is None:
             QMessageBox.warning(self, '启动失败', f'无法启动终端（目录：{cwd}）')
             return
         mode_txt = '危险模式' if dlg.mode() == 'danger' else '正常模式'
         suffix = f'，继承 {len(inherit_ids)} 个会话' if inherit_ids else ''
-        self.status_message.emit(f'已在新终端启动会话（{cwd}，{provider}，{mode_txt}{suffix}）', 3000)
+        model_txt = f'，{dlg.model()}' if dlg.model() else ''
+        self.status_message.emit(
+            f'已在新终端启动会话（{cwd}，{provider}{model_txt}，{mode_txt}{suffix}）', 3000)
         self._rescan()
         QTimer.singleShot(2500, self._rescan)
 
@@ -597,10 +603,10 @@ class SessionPanel(QWidget):
             return  # 分组标题行不弹菜单
         s = self._by_id.get(sid)
         menu = FadeMenu(self)
-        act_start = menu.addAction(ui_icon('play', 15, '#d4d4d8'), '启动（恢复）')
-        act_open = menu.addAction(ui_icon('folder-open', 15, '#d4d4d8'), '打开所在目录')
-        act_copy = menu.addAction(ui_icon('copy', 15, '#d4d4d8'), '复制会话 ID')
-        act_export = menu.addAction(ui_icon('download', 15, '#d4d4d8'), '导出')
+        act_start = menu.addAction(ui_icon('play', 15), '启动（恢复）')
+        act_open = menu.addAction(ui_icon('folder-open', 15), '打开所在目录')
+        act_copy = menu.addAction(ui_icon('copy', 15), '复制会话 ID')
+        act_export = menu.addAction(ui_icon('download', 15), '导出')
         menu.addSeparator()
         act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
         if s and s.isLive:
@@ -707,13 +713,16 @@ class SessionPanel(QWidget):
         provs = self.service.list_providers()
         default_provider = self.service.resolve_provider(sid, s.models)
         default_mode = self.service.detect_permission_mode(sid)
+        # 预选会话上次实际用的模型（若在所选 provider 的池中，_populate 会校验）
+        default_model = s.models[-1] if s.models else ''
         dlg = ResumeDialog(default_mode, trunc(s.title or sid[:8], 40),
-                           provs['names'], default_provider, self)
+                           provs['names'], default_provider, self,
+                           providers_map=provs['providers'], default_model=default_model)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         mode = dlg.mode()
         provider = dlg.provider()
-        if self.service.resume(sid, mode, provider):
+        if self.service.resume(sid, mode, provider, cwd=s.projectPath, model=dlg.model()):
             self.status_message.emit(f'已在新终端恢复会话（{mode}模式，{provider}）', 3000)
         else:
             QMessageBox.warning(self, '启动失败', f'无法启动终端恢复会话（{sid}）')

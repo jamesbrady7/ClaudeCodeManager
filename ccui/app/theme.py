@@ -218,6 +218,29 @@ QPushButton#btnNew:pressed {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                 stop:0 #0876e8, stop:1 #1b8bf0);
 }
+/* 绿色行动按钮（如「用此 Provider 新建会话」）：与 btnNew 同构，Apple 绿。
+   注意 background 不吃 rgba alpha → 用不透明渐变 */
+QPushButton#btnSuccess {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #36d15c, stop:1 #28a745);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: white;
+    font-weight: 600;
+    padding: 6px 20px;
+}
+QPushButton#btnSuccess:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #43da68, stop:1 #2fb84f);
+}
+QPushButton#btnSuccess:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #22903c, stop:1 #31c054);
+}
+QPushButton#btnSuccess:disabled {
+    color: rgba(255, 255, 255, 0.55);
+    background: #2c3a2f;
+    border-color: rgba(255, 255, 255, 0.05);
+}
 QPushButton#btnResume {
     padding: 3px 8px;
     min-height: 20px;

@@ -9,6 +9,7 @@
   roles.changed          角色列表变化（增删角色）
   role.sessions.changed  某角色追踪的会话记录变化（payload: name）
   skills.changed         技能库增删改/导入导出
+  providers.changed      cc-config.json 变化（Provider/模型池增删改、默认切换）
 """
 from ccui.infra.config import log
 

@@ -57,10 +57,11 @@ class SessionService:
         return store.detect_permission_mode(sid)
 
     # ---- 动作 ----
-    def new_session(self, cwd, provider, mode='normal', inherit_path=None):
+    def new_session(self, cwd, provider, mode='normal', inherit_path=None, model=''):
         """以指定 provider+权限模式在 cwd 启动新会话，登记占位。返回 SpawnedSession 或 None。
 
         mode: 'normal' | 'danger'（danger 时 `cc danger ...` 跳过权限确认）。
+        model: 指定模型名（cc.cmd 扫描 --model → cc-config-read.ps1 覆盖 ANTHROPIC_MODEL）。
         inherit_path 给定时通过 CC_INHERIT 环境变量传给 SessionStart hook，
         让新会话先读继承摘要文件。
         """
@@ -69,6 +70,8 @@ class SessionService:
             args.append('danger')
         if provider and provider != '(无)':
             args += ['--provider', provider]
+        if model:
+            args += ['--model', model]
         env = {'CC_INHERIT': inherit_path} if inherit_path else None
         proc = spawn_terminal(args, cwd, env=env)
         if proc is None:
@@ -173,14 +176,21 @@ class SessionService:
             SignalHub.instance().emit('sessions.changed')
         return res
 
-    def resume(self, sid, mode, provider):
-        """以指定模式+provider 恢复会话，并记录会话→provider 映射。"""
+    def resume(self, sid, mode, provider, cwd='', model=''):
+        """以指定模式+provider 恢复会话，并记录会话→provider 映射。
+
+        cwd 必须传会话原项目目录：claude --resume <id> 只在**当前目录对应的
+        项目**下找 transcript，用 CONFIG_DIR 恢复其它目录的会话会报
+        "No conversation found with session ID"。目录不存在时回退 CONFIG_DIR。
+        """
         provider_data.record_session_provider(sid, provider)
+        model_args = ['--model', model] if model else []
         if mode == 'danger':
-            args = ['cc', 'danger', '--resume', sid, '--provider', provider]
+            args = ['cc', 'danger', '--resume', sid, '--provider', provider] + model_args
         else:
-            args = ['cc', 'resume', sid, '--provider', provider]
-        ok = spawn_terminal(args, CONFIG_DIR) is not None
+            args = ['cc', 'resume', sid, '--provider', provider] + model_args
+        run_cwd = cwd if cwd and os.path.isdir(cwd) else CONFIG_DIR
+        ok = spawn_terminal(args, run_cwd) is not None
         if ok:
             SignalHub.instance().emit('sessions.changed')
         return ok

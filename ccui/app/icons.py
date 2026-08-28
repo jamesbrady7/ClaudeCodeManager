@@ -4,6 +4,7 @@
 否则 QPainter 画首字母彩色徽章。ui_icon 从 assets/icons/<name>.svg（Lucide）渲染。
 """
 import os
+import re
 import zlib
 
 from PySide6.QtCore import Qt, QRectF, QByteArray
@@ -43,12 +44,59 @@ def _badge_pixmap(initials, color, size):
 
 _UI_ICON_CACHE = {}  # (name, size, color) → QIcon（树重建/工具栏热路径，渲染一次复用）
 
+# 语义色板（Apple dark 系）：深色底上灰图标会"融入背景"，按含义给色让图标可扫读。
+# ui_icon 不传 color 时自动查此表；查不到 → 中性亮灰 ICON_DEFAULT。
+ICON_DEFAULT = '#c7c7cc'
+ICON_TINTS = {
+    'message-square': '#4ea1ff',  # 会话
+    'users': '#bf5af2',           # 角色
+    'wrench': '#4ea1ff',          # 技能/管理
+    'boxes': '#ff9f0a',           # 模型 tab
+    'clock': '#64d2ff',           # 时间
+    'repeat': '#bf5af2',          # 轮数
+    'cpu': '#4ea1ff',             # 模型
+    'database': '#ff9f0a',        # 大小/存储
+    'activity': '#30d158',        # 状态
+    'play': '#30d158',            # 启动/恢复
+    'trash-2': '#ff6961',         # 删除
+    'broom': '#ff9f0a',           # 清理
+    'book-open': '#bf5af2',       # 知识库
+    'settings': '#64d2ff',        # 编辑信息
+    'folder-open': '#ffd60a',     # 目录
+    'folder': '#ffd60a',
+    'copy': '#c7c7cc',            # 复制属工具动作，保持中性
+    'upload': '#30d158',
+    'download': '#64d2ff',
+    'search': '#8e8e96',
+    'shield-check': '#30d158',    # 正常模式（护盾生效）
+    'shield-off': '#ff6961',      # 危险模式
+    'shield': '#4ea1ff',
+    'eye': '#64d2ff',
+    'eye-off': '#8e8e96',
+    'star': '#ffd60a',
+    'zap': '#ffd60a',
+    'palette': '#ff9f0a',
+    'layers': '#4ea1ff',
+    'presentation': '#bf5af2',
+    'layout-grid': '#64d2ff',
+    'image': '#bf5af2',
+    'puzzle': '#ff9f0a',
+    'sparkles': '#ffd60a',
+    'key': '#ffd60a',
+    'globe': '#64d2ff',
+    'pen-tool': '#4ea1ff',
+    'brain': '#bf5af2',
+    'rocket': '#ff9f0a',
+}
 
-def ui_icon(name, size=16, color='#c8c8cc'):
+
+def ui_icon(name, size=16, color=None):
     """Lucide 图标：读 assets/icons/<name>.svg，把 currentColor 换成指定色，HiDPI 渲染 QIcon。
 
-    color 传十六进制如 '#f5f5f7'；danger 用 '#ff6961' 等。按 (name,size,color) 缓存避免重复渲染。
+    color 省略 → 查 ICON_TINTS 语义色板（深色底不融入），未收录者用 ICON_DEFAULT。
+    显式传色用于语境覆盖（如主按钮上的白色 #ffffff）。按 (name,size,color) 缓存。
     """
+    color = color or ICON_TINTS.get(name, ICON_DEFAULT)
     key = (name, size, color)
     cached = _UI_ICON_CACHE.get(key)
     if cached is not None:
@@ -81,6 +129,85 @@ def ui_icon(name, size=16, color='#c8c8cc'):
         return QIcon()
 
 
+# ---- 品牌 logo 深色底适配 ---------------------------------------------------
+# simple-icons 类单色 logo（currentColor / 纯黑填充 / 无 fill 声明=SVG 默认黑）
+# 在深色界面里等于隐形（kimi #000、anthropic #191919、apple currentColor 均是）。
+# 检测为"单色暗 logo"时整体提亮为近白色剪影；渐变/彩色/含近白部件的 logo 原样保留。
+_LIGHT_LOGO = '#ececf1'
+
+
+def _hex_rgb(h):
+    h = h if len(h) == 6 else ''.join(c * 2 for c in h)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _svg_needs_tint(text):
+    """True = 应提亮；False = 保留原色（渐变/品牌彩色/含近白部件防白底白字）。"""
+    if 'url(#' in text:
+        return False
+    cols = re.findall(r'(?:fill|stroke)="#([0-9a-fA-F]{3,6})"', text)
+    for h in cols:
+        r, g, b = _hex_rgb(h)
+        mx, mn = max(r, g, b), min(r, g, b)
+        if mn > 200:                       # 有近白部分（深色底块+白字的 logo）
+            return False
+        if mx - mn > 70 and 0x20 < mx < 0xF5:   # 高饱和品牌彩（minimax/claude 等）
+            return False
+    return ('currentColor' in text or not cols
+            or all(max(_hex_rgb(h)) < 90 for h in cols))
+
+
+def _tint_svg_text(text, tint=_LIGHT_LOGO):
+    text = text.replace('currentColor', tint)
+
+    def _dark(m):
+        key, h = m.group(1), m.group(2)
+        return f'{key}="{tint}"' if max(_hex_rgb(h)) < 90 else m.group(0)
+    return re.sub(r'\b(fill|stroke)="#([0-9a-fA-F]{3,6})"', _dark, text)
+
+
+_BRAND_CACHE = {}   # (path, mtime, size, px) → QIcon（键含 mtime/size，覆盖写自动失效）
+
+
+def brand_svg_icon(path, size=20):
+    """品牌图标统一入口：PNG 直通；SVG 经单色检测（必要时提亮）后 HiDPI 渲染。"""
+    if not path or not os.path.exists(path):
+        return QIcon()
+    if not path.lower().endswith('.svg'):
+        return QIcon(path)
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime, st.st_size, size)
+    except Exception:
+        key = (path, 0, 0, size)
+    hit = _BRAND_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+        if _svg_needs_tint(text):
+            text = _tint_svg_text(text)
+        from PySide6.QtSvg import QSvgRenderer
+        renderer = QSvgRenderer(QByteArray(text.encode('utf-8')))
+        app = QApplication.instance()
+        dpr = app.devicePixelRatio() if app and app.devicePixelRatio() > 1.0 else 1.0
+        pm = QPixmap(int(size * dpr), int(size * dpr))
+        pm.fill(Qt.GlobalColor.transparent)
+        pm.setDevicePixelRatio(dpr)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(p, QRectF(0, 0, size, size))   # 逻辑尺寸矩形（HiDPI 坑）
+        p.end()
+        icon = QIcon(pm)
+    except Exception:
+        icon = QIcon(path)
+    if len(_BRAND_CACHE) >= 300:
+        _BRAND_CACHE.clear()
+    _BRAND_CACHE[key] = icon
+    return icon
+
+
 def provider_icon(name, size=16):
     """provider 徽章：assets/providers/<name>.png|.svg 存在则用之，否则画品牌色首字母徽章。"""
     name = name or ''
@@ -88,7 +215,7 @@ def provider_icon(name, size=16):
         for ext in ('.png', '.svg'):
             p = os.path.join(ASSETS_DIR, 'providers', f'{name.lower()}{ext}')
             if os.path.exists(p):
-                return QIcon(p)
+                return brand_svg_icon(p, size)
     initials = _PROVIDER_INITIALS.get(name.lower())
     if not initials:
         initials = ''.join(ch for ch in name if ch.isalnum())[:2].upper() or '?'
@@ -99,7 +226,7 @@ def provider_icon(name, size=16):
 def role_icon(name, icon_path=None, size=20):
     """角色图标：icon_path（roles/<name>/icon.*）存在则用之，否则画首字母彩色徽章。"""
     if icon_path and os.path.exists(icon_path):
-        return QIcon(icon_path)
+        return brand_svg_icon(icon_path, size)
     name = name or '?'
     initial = (name[:1] or '?').upper()
     colors = _ROLE_COLORS
@@ -141,10 +268,18 @@ def _svg_content_pixmap(path):
     if key in _SVG_CACHE:
         return _SVG_CACHE[key]
     from PySide6.QtSvg import QSvgRenderer
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+        if _svg_needs_tint(text):        # 单色暗 logo 提亮（与 brand_svg_icon 同规则）
+            text = _tint_svg_text(text)
+        renderer = QSvgRenderer(QByteArray(text.encode('utf-8')))
+    except Exception:
+        renderer = QSvgRenderer(path)
     tmp = QPixmap(128, 128)
     tmp.fill(Qt.GlobalColor.transparent)
     tp = QPainter(tmp)
-    renderer = QSvgRenderer(path)
+    tp.setRenderHint(QPainter.RenderHint.Antialiasing)
     renderer.render(tp, QRectF(0, 0, 128, 128))
     tp.end()
     img = tmp.toImage()

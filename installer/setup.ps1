@@ -109,8 +109,13 @@ if (-not (Test-Path $cfgPath)) {
     $template = @{
         'provider config' = @{
             'default provider' = 'deepseek'
-            deepseek = @{ baseUrl = 'https://api.deepseek.com/anthropic'; apiKey = ''; model = 'deepseek-v4-flash'; fastModel = 'deepseek-v4-flash' }
-            glm      = @{ baseUrl = 'https://open.bigmodel.cn/api/anthropic'; apiKey = ''; model = 'glm-5.2'; fastModel = 'glm-4.7' }
+            deepseek   = @{ baseUrl = 'https://api.deepseek.com/anthropic'; apiKey = ''; model = 'deepseek-v4-flash'; fastModel = 'deepseek-v4-flash' }
+            glm        = @{ baseUrl = 'https://open.bigmodel.cn/api/anthropic'; apiKey = ''; model = 'glm-5.2'; fastModel = 'glm-4.7' }
+            qwen       = @{ baseUrl = 'https://dashscope.aliyuncs.com/apps/anthropic'; apiKey = ''; model = ''; fastModel = '' }
+            kimi       = @{ baseUrl = 'https://api.moonshot.cn/anthropic'; apiKey = ''; model = ''; fastModel = '' }
+            minimax    = @{ baseUrl = 'https://api.minimaxi.com/anthropic'; apiKey = ''; model = ''; fastModel = '' }
+            xiaomi     = @{ baseUrl = 'https://api.xiaomimimo.com/anthropic'; apiKey = ''; model = ''; fastModel = '' }
+            anthropic  = @{ baseUrl = 'https://api.anthropic.com'; apiKey = ''; model = ''; fastModel = '' }
         }
     }
     $template | ConvertTo-Json -Depth 5 | Set-Content $cfgPath -Encoding UTF8

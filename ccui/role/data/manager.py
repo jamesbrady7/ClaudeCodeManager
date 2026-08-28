@@ -25,12 +25,24 @@ class RoleManager:
             cls._instance = cls()
         return cls._instance
 
-    def _load(self):
-        """从磁盘重建角色 map（meta.json + sessions.jsonl + knowledge），并回填缺失 uuid。"""
+    def _load(self, existing_ids=None, live_ids=None):
+        """从磁盘重建角色 map（meta.json + sessions.jsonl + knowledge），并回填缺失 uuid。
+
+        existing_ids/live_ids 由 View 传入（SessionManager 的 by_id/live_ids），
+        给定时 sessionCount/session_ids 只统计**实际可显示的会话**（有 transcript 或运行中），
+        与角色会话列表一致——孤儿记录（hook 记录但无 transcript 且非 live）不计入。
+        """
+        exist = None
+        if existing_ids is not None:
+            exist = set(existing_ids)
+            live = set(live_ids or [])
         roles = {}
         for name in role_store.list_role_names():
             meta = role_store.read_meta(name)
             tracked = role_store.role_sessions_from_file(name)
+            if exist is not None:
+                tracked = [t for t in tracked
+                           if t.get('session_id') in exist or t.get('session_id') in live]
             k = role_store.read_knowledge(name)
             roles[name] = Role(
                 name=name,
@@ -54,12 +66,12 @@ class RoleManager:
         self._roles = roles
         return roles
 
-    def roles(self):
-        """全部角色（最新，从磁盘读取）。"""
-        return list(self._load().values())
+    def roles(self, existing_ids=None, live_ids=None):
+        """全部角色（最新，从磁盘读取）。给 existing_ids 时只统计可显示会话。"""
+        return list(self._load(existing_ids, live_ids).values())
 
-    def get(self, name):
-        return self._load().get(name)
+    def get(self, name, existing_ids=None, live_ids=None):
+        return self._load(existing_ids, live_ids).get(name)
 
     def session_entries(self, name):
         """该角色追踪的会话原始条目 [{session_id, timestamp, cwd}]。"""

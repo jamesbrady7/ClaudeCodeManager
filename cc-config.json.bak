@@ -1,0 +1,61 @@
+{
+  "provider config": {
+    "default provider": "glm",
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "apiKey": "sk-67d621ef0cfe4249afb786300853c378",
+      "model": "deepseek-v4-flash",
+      "fastModel": "deepseek-v4-flash",
+      "models": [
+        "deepseek-v4-flash"
+      ]
+    },
+    "glm": {
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+      "apiKey": "049afe6fffba4242a16fc35df74870a4.P2lLaAei8HWmzxRO",
+      "model": "glm-4.7",
+      "fastModel": "glm-4.7",
+      "models": [
+        "glm-5.2",
+        "glm-4.7"
+      ]
+    },
+    "qwen": {
+      "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",
+      "apiKey": "sk-ws-H.EXHYLRE.QIHh.MEQCIDrOHYqkRQUyrFioGSKwL0l61qcZ6O4a3HED6lyVs8hQAiBQR6gMMZwMhsfgQ-re7KDYl3QhKkZAOeDFuLk8JmnMoQ",
+      "model": "qwen3.8-flash",
+      "fastModel": "qwen3.8-flash",
+      "models": [
+        "qwen3.8-flash"
+      ]
+    },
+    "kimi": {
+      "baseUrl": "https://api.moonshot.cn/anthropic",
+      "apiKey": "",
+      "model": "",
+      "fastModel": "",
+      "models": []
+    },
+    "minimax": {
+      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "apiKey": "",
+      "model": "",
+      "fastModel": "",
+      "models": []
+    },
+    "anthropic": {
+      "baseUrl": "https://api.anthropic.com",
+      "apiKey": "",
+      "model": "",
+      "fastModel": "",
+      "models": []
+    },
+    "xiaomi": {
+      "baseUrl": "https://api.xiaomimimo.com/anthropic",
+      "apiKey": "",
+      "model": "",
+      "fastModel": "",
+      "models": []
+    }
+  }
+}

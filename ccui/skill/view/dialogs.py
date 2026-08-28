@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 
 from ccui.infra.config import ASSETS_DIR
 from ccui.app.dialogs import FadeDialog, mk_buttons
-from ccui.app.icons import ui_icon
+from ccui.app.icons import ui_icon, brand_svg_icon
 from ccui.skill.data.store import SKILL_CATEGORY_LABELS
 
 
@@ -131,10 +131,10 @@ class GroupIconPicker(FadeDialog):
     def _make_icon(self, key):
         p = os.path.join(ASSETS_DIR, 'icons', f'{key}.svg')
         if os.path.exists(p):
-            return ui_icon(key, 24, '#c8c8cc')
+            return ui_icon(key, 24)
         p2 = os.path.join(ASSETS_DIR, 'role-icons', key)
         if os.path.exists(p2):
-            return QIcon(p2)
+            return brand_svg_icon(p2, 24)
         return QIcon()
 
     def _pick(self, key):

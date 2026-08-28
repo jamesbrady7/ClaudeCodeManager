@@ -78,8 +78,9 @@ def _knowledge_template(name):
 
 class RoleService:
     # ---- 角色 ----
-    def list_roles(self):
-        return RoleManager.instance().roles()
+    def list_roles(self, existing_ids=None, live_ids=None):
+        """列出全部角色。给 existing_ids/live_ids 时 sessionCount 只统计可显示会话。"""
+        return RoleManager.instance().roles(existing_ids, live_ids)
 
     def create_role(self, name, description, skills):
         name = (name or '').strip()
@@ -138,8 +139,12 @@ class RoleService:
         SignalHub.instance().emit('roles.changed')
         return {'ok': True}
 
-    def start_role(self, name, from_ids=None, cwd=None, mode='normal'):
+    def start_role(self, name, from_ids=None, cwd=None, mode='normal', provider='', model=''):
         args = ['cc', 'role', name]
+        if provider and provider != '(无)':
+            args += ['--provider', provider]
+        if model and model != '(无)':
+            args += ['--model', model]
         if from_ids:
             args += ['--from', ','.join(from_ids)]
         if mode == 'danger':

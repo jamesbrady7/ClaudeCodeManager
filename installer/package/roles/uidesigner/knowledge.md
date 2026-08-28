@@ -25,6 +25,7 @@
 - 关联记录在 `roles/<role>/sessions.jsonl`（`{session_id, timestamp, cwd}`），`ccui/role/data/store.py::session_role_map()` 反查全局 `session_id → 角色名`
 - 主会话面板用它显示「角色」列；角色面板用它交叉引用 transcript 出标题/轮数/模型
 - **孤儿记录**：hook 启动即记录 session_id，无 transcript 的会残留 → 角色面板只显示 `s.exists` 的会话；`role_service.prune_stale_role_sessions` 年龄守卫清理（无 transcript 且旧于 10 分钟）
+- **⚠️ sessionCount 与列表不一致**：`RoleManager._load` 曾用 `len(tracked)`（含孤儿）作 sessionCount，角色列表显示 5 但列表只有 4（孤儿被隐藏）。修复：`roles(existing_ids, live_ids)` 支持传入 SessionManager 的 by_id/live_ids，过滤孤儿（只统计**有 transcript 或 live** 的记录）→ sessionCount 与角色会话列表一致；role_panel._load_roles 传 `set(sm.by_id())` + `sm.live_ids()`（by_id 有解析缓存，非热路径可接受）；不传参时行为不变
 
 ## 事件驱动架构（SignalHub）
 - `ccui/infra/signalhub.py`：纯 Python 事件总线（单例）`emit(event, **payload)` / `subscribe(event, fn)`；「谁改数据谁通知」
@@ -179,6 +180,7 @@
 ## 三项修复（未来时间戳/角色会话模式/列分布）
 - **⚠️ 未来时间戳脏数据**：transcript 里可能混入 `timestamp=2099-01-01` 这类异常条目（顶层 user 行），`_parse_transcript` 取最大时间戳时把它当 lastTime → 时间列显示 `01-01 08:00`。修复：**过滤未来时间戳**（`iso_to_ms(ts) <= now+1h`，容忍时钟偏差）；`build_inherit` 的 first_ts 同理
 - **创建角色会话可选权限模式**：InheritDialog（cwd_visible=True 即该场景）加 `cb_mode` 下拉；`role_service.start_role(name, from_ids, cwd, mode)` 传 `--mode danger`；**cc-role.ps1 Start-Role 加 `--mode` 解析**（danger 时 `& $claudeCmd danger`，与恢复会话语法一致）；role_panel._start 传 `dlg.mode()`
+- **创建角色会话可选 Provider**：InheritDialog（cwd_visible）再加 `cb_provider` 下拉（`providers/default_provider` 参数，item 带 `provider_icon`）；`start_role(..., provider='')` 时 args 插 `--provider <p>`（任意位置，cc.cmd 顶部 for 循环解析 CC_PROVIDER → cc-config-read -Provider p 注入环境变量，cc-role.ps1 忽略该参数但继承环境启动 claude）；已验证 `cc role uidesigner --provider qwen` 注入 MODEL=qwen3.8-flash/BASE=dashscope/KEY 正确；非 cwd_visible（新建会话继承弹窗）不显示 provider 下拉、`provider()` 返回空
 - **继承/删除对话框列分布**：InheritDialog（会话/时间）、DeleteDialog（会话/项目）列宽不平衡——加 `header.setStretchLastSection(False)` + col0 `Stretch` + col1 `ResizeToContents`，标题列吃满剩余、次要列收缩到内容
 
 ## 技能列表交互拆分（编辑 vs 勾选不冲突）
@@ -273,7 +275,16 @@
 - Find-Installs/Remove-Install：判定=有 cc-ui.exe 或 (cc.cmd+cc-role.ps1)；扫所有盘符根 ClaudeCodeManager/ClaudeCode；自动卸载**默认不勾选** + 删除前二次确认并标注含 .git 目录（防误删 D:\ClaudeCode 这类开发目录）
 - **测试副作用清理**：跑 setup.ps1 会真实设置 User 环境变量（CLAUDE_CONFIG_DIR/PATH）+ 桌面快捷方式，测试后必须 `SetEnvironmentVariable(...,$null,'User')` 恢复 + 删快捷方式；给 python 传路径要用 cygpath -w（MSYS /tmp 路径 Windows python 不认，解压会去错地方）
 
+## 终端启动 + 恢复会话（目标机踩坑，2026-08-27）
+- **问题1：目标机终端老旧、章鱼渲染成方块 □□□、对话后输入框假死**——根因是 `cmd.exe + CREATE_NEW_CONSOLE` 落到 **legacy conhost**（当系统「默认终端应用」设为 Windows 控制台主机时）。conhost：点阵字体画不出 Ink 的块状字形（小章鱼/图标碎裂）、CJK 宽度错位致 TUI 重绘错乱、**QuickEdit 一点击就挂起整个进程**（= 无法输入）。开发机默认终端恰好是 Windows Terminal 所以从没暴露。
+- **修复**：`ccui/infra/process.py::spawn_terminal` 优先用 **`wt.exe`**（App Execution Alias，`shutil.which('wt')` 探测并缓存 `_WT_EXE`），强制开在 Windows Terminal，**无视系统默认终端设置**。找不到 wt 才回退 cmd+CREATE_NEW_CONSOLE（Win10 无 WT）。
+- **wt 两大实测要点**：① 自定义 env（CC_INHERIT 等）**会透传**给 wt 子进程（用 dump 全环境的 .cmd 验证，别用 `echo %VAR%>` 那种被 `>` 吞掉的假阴性）；② **wt 客户端进程 0.03s 秒退**（真正的 shell 由 WindowsTerminal 服务端托管），所以不能用它的 Popen 句柄判断会话存活。
+- **秒退处理**：wt 分支返回 `_Delegated()`（`pid=None`、`poll()=None`）。占位合并里 `if e.pid and ...` 因 pid=None 短路 → 跳过存活检测 → 占位一直显示到 transcript 物化被 matching 吸收（~1-2s）。若返回死掉的 wt pid，会在 2s grace 后误判「已退出」致占位行闪断。
+- **问题2：`No conversation found with session ID`**——根因是真 bug：`session_service.resume` 用 `CONFIG_DIR` 当 cwd 启动 `claude --resume <id>`，而 **claude 按「当前目录对应的项目」查 transcript**。开发机会话都在 D:\ClaudeCode（=CONFIG_DIR）被掩盖；目标机会话在别目录 → 找不到。修复：`resume(..., cwd=s.projectPath)`，两处调用方（session_panel/role_panel）传 `s.projectPath`/`ref.projectPath`；目录不存在回退 CONFIG_DIR。
+- **cwd 归一**：`projectPath` 是正斜杠形式（`C:/Users/x`），`spawn_terminal` 内 `os.path.normpath` 转反斜杠再给 `wt -d`。
+
 ## 会话模型列（<synthetic> 过滤 + 最后模型）
+
 - `store._parse_transcript` 曾 `models.add(msg['model'])` 累积所有 assistant 模型 → 模型列显示 `<synthetic> deepseek-v4-pro` 等脏值（claude 会写 `<synthetic>` 伪模型；同会话 /model 中途切换会累积多个历史模型）
 - 修复：过滤 `startswith('<')` 伪模型，只保留**最后**一条真实模型（模型列 = 会话当前/最终用的模型，切换后显示最新的）；`models` 仍是 list（provider 推断 `set(models)` 兼容单元素）；改解析逻辑后 `_SUMMARY_CACHE` 需清空才见新值
 

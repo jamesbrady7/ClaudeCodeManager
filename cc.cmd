@@ -6,18 +6,26 @@ rem      "not compatible with Windows" 报错；手动更新可临时删掉这�
 set DISABLE_AUTOUPDATER=1
 set DISABLE_UPDATES=1
 
-rem ---- 解析会话级供应商：cc ... --provider <name> ----
+rem ---- 解析会话级供应商/模型：cc ... --provider <name> [--model <name>] ----
 set "CC_PROVIDER="
 set "CC_PROVIDER_ARG="
+set "CC_MODEL="
+set "CC_MODEL_ARG="
 for %%a in (%*) do (
     if defined CC_PROVIDER_ARG (
         set "CC_PROVIDER=%%a"
         set "CC_PROVIDER_ARG="
     )
+    if defined CC_MODEL_ARG (
+        set "CC_MODEL=%%a"
+        set "CC_MODEL_ARG="
+    )
     if /I "%%a"=="--provider" set "CC_PROVIDER_ARG=1"
+    if /I "%%a"=="--model" set "CC_MODEL_ARG=1"
 )
 rem 空 provider 时不传 -Provider（否则 PowerShell 报 MissingArgument）
 if defined CC_PROVIDER ( set "CC_PROVIDER_ARGS=-Provider !CC_PROVIDER!" ) else ( set "CC_PROVIDER_ARGS=" )
+if defined CC_MODEL ( set "CC_MODEL_ARGS=-Model !CC_MODEL!" ) else ( set "CC_MODEL_ARGS=" )
 
 rem ============================================================
 rem  Claude Code Launcher
@@ -60,7 +68,7 @@ if /I "%1"=="role"    goto role
 if /I "%1"=="roles"   goto role
 
 rem ---- default: normal start with current provider ----
-for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS!') do (
+for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS! !CC_MODEL_ARGS!') do (
     set "%%A=%%B"
 )
 
@@ -84,7 +92,7 @@ claude %*
 goto end
 
 :danger
-for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS!') do (
+for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS! !CC_MODEL_ARGS!') do (
     set "%%A=%%B"
 )
 rem 支持 danger 模式恢复会话（保留原上下文）
@@ -122,7 +130,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-clear.ps1" %2
 goto end
 
 :resume
-for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS!') do (
+for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS! !CC_MODEL_ARGS!') do (
     set "%%A=%%B"
 )
 if "%2"=="" (
@@ -144,7 +152,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-backup.ps1" %2
 goto end
 
 :role
-for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS!') do (
+for /f "tokens=1,* delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cc-config-read.ps1" !CC_PROVIDER_ARGS! !CC_MODEL_ARGS!') do (
     set "%%A=%%B"
 )
 chcp 65001 >nul

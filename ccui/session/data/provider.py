@@ -2,7 +2,7 @@
 import json
 import os
 
-from ccui.infra.config import CONFIG_DIR, PROVIDER_FILE, log
+from ccui.infra.config import CC_CONFIG_FILE, PROVIDER_FILE, log
 
 _provider_cache = {'key': None, 'map': {}}  # (mtime,size) → 映射，文件未变走缓存
 
@@ -47,7 +47,7 @@ def record_session_provider(sid, provider):
 def list_providers():
     """返回 {names, default, providers}。"""
     try:
-        cfg = json.load(open(os.path.join(CONFIG_DIR, 'cc-config.json'), encoding='utf-8'))
+        cfg = json.load(open(CC_CONFIG_FILE, encoding='utf-8-sig'))
         pc = cfg.get('provider config') or {}
         names = [n for n in pc if n != 'default provider']
         return {
@@ -60,10 +60,15 @@ def list_providers():
 
 
 def infer_provider(models, providers):
-    """从模型列表反推 provider：匹配任一 provider 的 model/fastModel。"""
+    """从模型列表反推 provider：匹配 provider 模型池（models 或 model/fastModel）。
+
+    两层配置后一个 provider 可有多个模型；此处不 import provider 模块（data 层
+    隔离规则），models 字段本就在读到的 cfg 里，逻辑与 store.provider_models 同构。
+    """
+    want = set(models or [])
     for name, p in providers.items():
-        ms = {p.get('model'), p.get('fastModel')} - {None}
-        if set(models or []) & ms:
+        pool = p.get('models') or [p.get('model'), p.get('fastModel')]
+        if want & {m for m in pool if m}:
             return name
     return None
 

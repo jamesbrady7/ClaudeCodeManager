@@ -23,7 +23,7 @@ from ccui.role.data.manager import RoleManager  # 引用计数在 view 层跨模
 from ccui.skill.service.skill_service import SkillService
 from ccui.skill.view.dialogs import NewSkillDialog, CategoryDialog, GroupIconPicker
 from ccui.app.theme import COLOR_MUTED
-from ccui.app.icons import ui_icon
+from ccui.app.icons import ui_icon, brand_svg_icon
 from ccui.app.widgets import PressButton, FadeMenu
 
 CATEGORY_ICONS = {
@@ -64,12 +64,12 @@ class SkillPanel(QWidget):
         self.btn_refresh.clicked.connect(self._reload)
         tb.addWidget(self.btn_refresh)
         self.btn_export = QPushButton(' 导出')
-        self.btn_export.setIcon(ui_icon('download', 14, '#c8c8cc'))
+        self.btn_export.setIcon(ui_icon('download', 14))
         self.btn_export.setToolTip('导出勾选的技能（批量）为 zip')
         self.btn_export.clicked.connect(self._export_checked)
         tb.addWidget(self.btn_export)
         self.btn_import = QPushButton(' 导入')
-        self.btn_import.setIcon(ui_icon('upload', 14, '#c8c8cc'))
+        self.btn_import.setIcon(ui_icon('upload', 14))
         self.btn_import.setToolTip('从 zip 导入技能（支持含多个技能）')
         self.btn_import.clicked.connect(self._import_skill)
         self.btn_import.setEnabled(not READONLY)
@@ -82,7 +82,7 @@ class SkillPanel(QWidget):
         self.edit_search.setPlaceholderText('搜索技能名 / 描述…')
         self.edit_search.setMaximumWidth(220)
         self.edit_search.setClearButtonEnabled(True)
-        self.edit_search.addAction(ui_icon('search', 14, '#6b6b70'),
+        self.edit_search.addAction(ui_icon('search', 14),
                                    QLineEdit.ActionPosition.LeadingPosition)
         self.edit_search.textChanged.connect(self._schedule_reload)  # 防抖：打字不逐键重建
         tb.addWidget(self.edit_search)
@@ -309,11 +309,11 @@ class SkillPanel(QWidget):
         key = self.skill_service.get_category_icon(cat) or CATEGORY_ICONS.get(cat, 'folder')
         p = os.path.join(ASSETS_DIR, 'icons', f'{key}.svg')
         if os.path.exists(p):
-            return ui_icon(key, size, '#9a9aa0')
+            return ui_icon(key, size)
         p2 = os.path.join(ASSETS_DIR, 'role-icons', key)
         if os.path.exists(p2):
-            return QIcon(p2)
-        return ui_icon('folder', size, '#9a9aa0')
+            return brand_svg_icon(p2, size)
+        return ui_icon('folder', size)
 
     def _set_category_icon(self, cat):
         dlg = GroupIconPicker(self, current=self.skill_service.get_category_icon(cat))
@@ -351,8 +351,8 @@ class SkillPanel(QWidget):
     # ---- 新建下拉（手动弹菜单，只有一个 ▾ 箭头）----
     def _show_new_menu(self):
         menu = QMenu(self)
-        act_skill = menu.addAction(ui_icon('wrench', 15, '#d4d4d8'), '新建技能')
-        act_cat = menu.addAction(ui_icon('folder', 15, '#d4d4d8'), '新建分组')
+        act_skill = menu.addAction(ui_icon('wrench', 15), '新建技能')
+        act_cat = menu.addAction(ui_icon('folder', 15), '新建分组')
         chosen = menu.exec(self.btn_new.mapToGlobal(QPoint(0, self.btn_new.height())))
         if chosen == act_skill:
             self._new_skill()
@@ -500,9 +500,9 @@ class SkillPanel(QWidget):
         if item.parent() is None:
             # 分组头
             cat = item.data(0, Qt.ItemDataRole.UserRole)
-            act_edit = menu.addAction(ui_icon('settings', 15, '#d4d4d8'), '编辑分组')
-            act_icon = menu.addAction(ui_icon('image', 15, '#d4d4d8'), '设置图标')
-            act_add = menu.addAction(ui_icon('plus', 15, '#d4d4d8'), '新增技能')
+            act_edit = menu.addAction(ui_icon('settings', 15), '编辑分组')
+            act_icon = menu.addAction(ui_icon('image', 15), '设置图标')
+            act_add = menu.addAction(ui_icon('plus', 15), '新增技能')
             act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除分组')
             chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
             if chosen == act_edit:
@@ -516,7 +516,7 @@ class SkillPanel(QWidget):
         else:
             name = item.data(0, Qt.ItemDataRole.UserRole)
             self._show_detail(self.skill_service.get_skill(name))
-            act_edit = menu.addAction(ui_icon('settings', 15, '#d4d4d8'), '编辑')
+            act_edit = menu.addAction(ui_icon('settings', 15), '编辑')
             act_del = menu.addAction(ui_icon('trash-2', 15, '#ff6961'), '删除')
             chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
             if chosen == act_edit:

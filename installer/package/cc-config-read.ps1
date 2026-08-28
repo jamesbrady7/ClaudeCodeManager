@@ -14,7 +14,8 @@
 # Defensive rule: if fastModel is absent/empty/invalid, fall back to main model.
 
 param(
-    [string]$Provider = ""   # 会话级指定 provider；为空则用 default provider
+    [string]$Provider = "",   # 会话级指定 provider；为空则用 default provider
+    [string]$Model = ""       # 会话级指定模型；为空则用 provider 的 model 字段
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,6 +64,11 @@ function Test-ValidModelName([string]$name) {
     if ($t -match '\s') { return $false }
     if ($t -match '[/\\]') { return $false }
     return $true
+}
+
+# 会话级 -Model 覆盖主模型（用户在「模型」下拉选的具体模型版本）
+if (-not [string]::IsNullOrWhiteSpace($Model) -and (Test-ValidModelName $Model)) {
+    $mainModel = $Model.Trim()
 }
 
 $fastModel = $mainModel

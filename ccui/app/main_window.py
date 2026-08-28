@@ -16,6 +16,7 @@ from ccui.infra.config import load_ui_state, save_ui_state
 from ccui.session.view.session_panel import SessionPanel
 from ccui.role.view.role_panel import RolePanel
 from ccui.skill.view.skill_panel import SkillPanel
+from ccui.provider.view.provider_panel import ProviderPanel
 
 
 class MainWindow(QMainWindow):
@@ -30,17 +31,26 @@ class MainWindow(QMainWindow):
         self.session_panel.status_message.connect(
             lambda text, ms: self.statusBar().showMessage(text, ms))
         self.tabs.addTab(self.session_panel,
-                         ui_icon('message-square', 14, '#9a9aa0'), '会话')
+                         ui_icon('message-square', 14), '会话')
         # 角色模块面板（左角色列表 + 右会话/详情）
         self.role_panel = RolePanel()
         self.role_panel.status_message.connect(
             lambda text, ms: self.statusBar().showMessage(text, ms))
-        self.tabs.addTab(self.role_panel, ui_icon('users', 14, '#9a9aa0'), '角色')
+        self.tabs.addTab(self.role_panel, ui_icon('users', 14), '角色')
         # 技能模块面板（技能库：浏览/新建/编辑/删除 + 被引用计数）
         self.skill_panel = SkillPanel()
         self.skill_panel.status_message.connect(
             lambda text, ms: self.statusBar().showMessage(text, ms))
-        self.tabs.addTab(self.skill_panel, ui_icon('wrench', 14, '#9a9aa0'), '技能')
+        self.tabs.addTab(self.skill_panel, ui_icon('wrench', 14), '技能')
+        # Provider 配置面板（「模型」tab：两层 provider+模型，写 cc-config.json）
+        self.provider_panel = ProviderPanel()
+        self.provider_panel.status_message.connect(
+            lambda text, ms: self.statusBar().showMessage(text, ms))
+        # 「用此 Provider 新建会话」→ 复用会话面板的新建向导（带 provider/model 预置）
+        self.provider_panel.new_session_requested.connect(
+            lambda prov, model: (self.tabs.setCurrentIndex(0),
+                                 self.session_panel.on_new_session(prov, model)))
+        self.tabs.addTab(self.provider_panel, ui_icon('boxes', 14), '模型')
         self.setCentralWidget(self.tabs)
         # 快捷键 + tab 淡切：在 tab 全部加入后再接线，避免首次设置即触发
         self._setup_shortcuts()
